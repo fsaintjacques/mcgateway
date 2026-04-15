@@ -18,6 +18,18 @@
 
 use mcgateway_core::{Entry, Merge, MergeResult};
 use wasmtime::{Config, Engine, Error, Instance, Linker, Memory, Module, Result, Store, TypedFunc};
+use wasmtime_wasi::p1::WasiP1Ctx;
+use wasmtime_wasi::WasiCtxBuilder;
+
+/// The host builds an empty WASI preview1 context for every store: no
+/// preopens, no env, no args, no stdio. The merge sandbox has zero
+/// ambient authority. The context exists only so Rust's stdlib — which
+/// wasm32-wasip1 targets against — can link against the import names
+/// it expects. Any guest call into WASI traps with a permission error
+/// by default; this is intentional.
+fn new_wasi_ctx() -> WasiP1Ctx {
+    WasiCtxBuilder::new().build_p1()
+}
 
 /// ABI version the host understands. Bumped whenever the entry or result
 /// encoding changes in an incompatible way. Guests expose their compiled
@@ -115,8 +127,9 @@ impl WasmMerge {
         // Probe once to verify the module exports the required functions
         // with the right signatures and to read its declared ABI version
         // plus optional required_flags.
-        let mut store = Store::new(&engine, ());
-        let linker = Linker::new(&engine);
+        let mut store = Store::new(&engine, new_wasi_ctx());
+        let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
+        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
         let instance = linker.instantiate(&mut store, &module)?;
 
         let abi_version: TypedFunc<(), u32> = instance
@@ -158,7 +171,7 @@ impl WasmMerge {
     }
 }
 
-fn read_required_flags(store: &mut Store<()>, instance: &Instance) -> Result<String> {
+fn read_required_flags(store: &mut Store<WasiP1Ctx>, instance: &Instance) -> Result<String> {
     let Ok(func) = instance.get_typed_func::<(), u64>(&mut *store, "mcgw_required_flags")
     else {
         return Ok(String::new());
@@ -198,8 +211,9 @@ impl Merge for WasmMerge {
 /// tests can exercise the full marshal → invoke → decode path and
 /// observe the underlying error.
 pub fn run(engine: &Engine, module: &Module, entries: &[Entry<'_>]) -> Result<MergeResult> {
-    let mut store = Store::new(engine, ());
-    let linker = Linker::new(engine);
+    let mut store = Store::new(engine, new_wasi_ctx());
+    let mut linker: Linker<WasiP1Ctx> = Linker::new(engine);
+    wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
     let instance = linker.instantiate(&mut store, module)?;
 
     let memory = instance
@@ -239,7 +253,7 @@ struct EncodedEntries {
 
 impl EncodedEntries {
     fn write(
-        store: &mut Store<()>,
+        store: &mut Store<WasiP1Ctx>,
         memory: &Memory,
         alloc: &TypedFunc<(u32, u32), u32>,
         entries: &[Entry<'_>],
@@ -295,7 +309,7 @@ struct FieldPtrs {
 
 impl FieldPtrs {
     fn write(
-        store: &mut Store<()>,
+        store: &mut Store<WasiP1Ctx>,
         memory: &Memory,
         alloc: &TypedFunc<(u32, u32), u32>,
         e: &Entry<'_>,
@@ -316,7 +330,7 @@ impl FieldPtrs {
 }
 
 fn write_bytes(
-    store: &mut Store<()>,
+    store: &mut Store<WasiP1Ctx>,
     memory: &Memory,
     alloc: &TypedFunc<(u32, u32), u32>,
     bytes: &[u8],
@@ -364,7 +378,7 @@ fn encode_entry(entry: &Entry<'_>, fields: &FieldPtrs, out: &mut [u8; ENTRY_SIZE
 }
 
 fn decode_result(
-    store: &mut Store<()>,
+    store: &mut Store<WasiP1Ctx>,
     memory: &Memory,
     dealloc: &TypedFunc<(u32, u32, u32), ()>,
     packed: u64,

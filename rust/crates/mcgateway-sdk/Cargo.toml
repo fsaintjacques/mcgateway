@@ -1,0 +1,13 @@
+[package]
+name = "mcgateway-sdk"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+mcgateway-sdk-macros = { path = "../mcgateway-sdk-macros" }
+
+[lints]
+workspace = true

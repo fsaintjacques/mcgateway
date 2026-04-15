@@ -9,9 +9,16 @@ publish = false
 [dependencies]
 mcgateway-core = { path = "../mcgateway-core" }
 wasmtime = "=43.0.1"
+wasmtime-wasi = "=43.0.1"
 
 [dev-dependencies]
 wat = "1"
+
+[features]
+# Enables tests that shell out to cargo to build the guest SDK example
+# (requires the wasm32-wasip1 toolchain). Off by default so
+# `cargo test -p mcgateway-wasm-host` stays fast.
+sdk-tests = []
 
 [lints]
 workspace = true
