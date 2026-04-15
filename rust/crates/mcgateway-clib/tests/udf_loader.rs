@@ -150,6 +150,27 @@ fn non_wasm_files_are_ignored() {
 }
 
 #[test]
+fn udf_dir_errors_when_env_points_at_nonexistent_path() {
+    // Serialise with other udf_dir tests since we mutate a process env
+    // var. Use a path guaranteed not to exist.
+    let missing = "/definitely/not/a/real/path/mcgw-udf-test";
+    let prev = std::env::var_os(udf_loader::UDF_DIR_ENV);
+    // Safety: the process env is a shared resource, but the test
+    // binary runs with --test-threads potentially > 1. Cargo defaults
+    // make the udf_loader tests the only tests touching this var.
+    unsafe { std::env::set_var(udf_loader::UDF_DIR_ENV, missing) };
+    let err = udf_loader::udf_dir().unwrap_err();
+    assert!(err.contains(missing), "message should mention the path: {err}");
+    assert!(err.contains(udf_loader::UDF_DIR_ENV));
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(udf_loader::UDF_DIR_ENV, v),
+            None => std::env::remove_var(udf_loader::UDF_DIR_ENV),
+        }
+    }
+}
+
+#[test]
 fn empty_dir_produces_empty_table() {
     let tmp = tempfile::tempdir().unwrap();
     let registries = build_registries_with_builtins();

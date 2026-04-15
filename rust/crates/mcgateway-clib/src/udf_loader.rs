@@ -21,17 +21,27 @@ pub const UDF_DIR_ENV: &str = "MCGW_UDF_DIR";
 /// Default on-disk location for compiled WASM merges.
 pub const DEFAULT_UDF_DIR: &str = "/etc/mcgateway/udf";
 
-/// Resolve the effective UDF directory. Returns `None` when neither
-/// the env override nor the default path exists — a perfectly valid
-/// deployment, e.g. when only built-ins are used.
-#[must_use]
-pub fn udf_dir() -> Option<PathBuf> {
+/// Resolve the effective UDF directory.
+///
+/// - `Ok(Some(path))` when a usable directory is found.
+/// - `Ok(None)` when `MCGW_UDF_DIR` is unset *and* the default path
+///   does not exist. A gateway running with only built-in merges is
+///   a valid deployment, so this is not an error.
+/// - `Err(msg)` when `MCGW_UDF_DIR` is explicitly set but points at
+///   something that is not a directory. Silently ignoring an
+///   operator-supplied path is a footgun; fail loudly instead.
+pub fn udf_dir() -> Result<Option<PathBuf>, String> {
     if let Ok(custom) = std::env::var(UDF_DIR_ENV) {
-        let p = PathBuf::from(custom);
-        return p.is_dir().then_some(p);
+        let p = PathBuf::from(&custom);
+        if p.is_dir() {
+            return Ok(Some(p));
+        }
+        return Err(format!(
+            "{UDF_DIR_ENV}={custom} is not a directory (or is unreadable)"
+        ));
     }
     let default = PathBuf::from(DEFAULT_UDF_DIR);
-    default.is_dir().then_some(default)
+    Ok(default.is_dir().then_some(default))
 }
 
 /// Build a [`WasmTable`] by scanning `dir` for `*.wasm` files. Each

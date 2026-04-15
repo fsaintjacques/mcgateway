@@ -66,18 +66,15 @@ impl Registries {
         guard.get(name).map(|e| e.merge.apply(entries))
     }
 
-    /// Flags the named merge wants returned on reads. Empty string if
-    /// the merge is unknown or declares no flags.
+    /// Flags the named merge wants returned on reads. `None` if the
+    /// merge is not registered; an empty string if the merge declares
+    /// no flags.
     #[must_use]
-    pub fn required_flags(&self, name: &str) -> String {
+    pub fn required_flags(&self, name: &str) -> Option<String> {
         if let Some(m) = self.builtins.get(name) {
-            return m.required_flags().to_string();
+            return Some(m.required_flags().to_string());
         }
-        self.wasm
-            .load()
-            .get(name)
-            .map(|e| e.required_flags.clone())
-            .unwrap_or_default()
+        self.wasm.load().get(name).map(|e| e.required_flags.clone())
     }
 
     /// All registered merge names, lexicographically sorted.

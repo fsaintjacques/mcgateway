@@ -40,10 +40,13 @@ fn build_registries() -> LuaResult<Arc<Registries>> {
     mcgateway_merge_builtins::register(&mut builtins);
     let registries = Arc::new(Registries::new(builtins));
 
-    // Discover WASM modules on disk. Failure to read the directory is
-    // hard; per-module failures are soft (logged, module skipped) so a
-    // single broken file can't take down the gateway's built-in merges.
-    if let Some(dir) = udf_loader::udf_dir() {
+    // Discover WASM modules on disk. Failure to read the directory —
+    // or an explicit MCGW_UDF_DIR pointing at an invalid path — is
+    // hard; per-module failures are soft (logged, module skipped) so
+    // a single broken file can't take down the gateway's built-ins.
+    let dir = udf_loader::udf_dir()
+        .map_err(|e| LuaError::RuntimeError(format!("mcgateway_native: {e}")))?;
+    if let Some(dir) = dir {
         let host = WasmHost::new().map_err(|e| {
             LuaError::RuntimeError(format!("mcgateway_native: wasm host init: {e:#}"))
         })?;
@@ -171,7 +174,9 @@ fn mcgateway_native(lua: &Lua) -> LuaResult<LuaTable> {
         let registries = registries.clone();
         let required_flags = lua.create_function(move |_, name: LuaString| {
             let name = name_str(&name)?;
-            Ok(registries.required_flags(&name))
+            registries.required_flags(&name).ok_or_else(|| {
+                LuaError::RuntimeError(format!("mcgateway_native: unknown merge {name:?}"))
+            })
         })?;
         exports.set("required_flags", required_flags)?;
     }
