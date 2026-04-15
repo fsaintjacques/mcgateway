@@ -24,7 +24,7 @@ RUN ./configure --enable-proxy --prefix=/opt/memcached \
 # and compile the example WASM merge UDF the runtime image ships with.
 # Alpine musl target matches the memcached binary's libc; undefined Lua
 # symbols in the .so are resolved by the memcached process at dlopen time.
-FROM rust:1.85-alpine3.20 AS rust-build
+FROM rust:1.94-alpine3.20 AS rust-build
 
 RUN apk add --no-cache build-base
 # `wasm32-wasip1` is the SDK's canonical target — rustup adds it on
@@ -38,7 +38,8 @@ COPY rust/.cargo ./.cargo
 COPY rust/crates ./crates
 COPY rust/examples ./examples
 RUN cargo build --release -p mcgateway-clib \
- && cargo build --release --target wasm32-wasip1 -p merge-last-n-wins
+ && cargo build --release --target wasm32-wasip1 -p merge-last-n-wins \
+ && cargo build --release --target wasm32-wasip1 -p merge-profile-proto
 
 # Runtime image.
 FROM alpine:3.20
@@ -55,6 +56,8 @@ COPY --from=rust-build /src/rust/target/release/libmcgateway_native.so \
 # will later mount here as well; the directory shape is stable.
 COPY --from=rust-build /src/rust/target/wasm32-wasip1/release/merge_last_n_wins.wasm \
                        /etc/mcgateway/udf/merge_last_n_wins.wasm
+COPY --from=rust-build /src/rust/target/wasm32-wasip1/release/merge_profile_proto.wasm \
+                       /etc/mcgateway/udf/merge_profile_proto.wasm
 
 RUN mkdir -p /etc/mcgateway/lua/mcgateway
 

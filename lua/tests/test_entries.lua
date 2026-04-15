@@ -35,7 +35,13 @@ check(entries._classify(nil)                    == "error", "classify nil -> err
 
 -- build: pool-ordered entries for a single key ----------------------------
 do
-    local function stub_res(tag) return { ok=function() return true end, hit=function() return true end, line=function() return "VA 3" end, _tag=tag } end
+    local function stub_res(tag) return {
+        ok=function() return true end, hit=function() return true end,
+        line=function() return "VA 3" end,
+        vlen=function() return 0 end,
+        raw_string=function() return nil end,
+        _tag=tag,
+    } end
     local pools = { "a", "b" }
     local results = { stub_res("a"), stub_res("b") }
     local es = entries.build("user:1", pools, results)

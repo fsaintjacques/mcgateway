@@ -49,13 +49,14 @@ local function make_read_handler(rctx, handles, pool_names, merge_name, merge_fl
             local e = entries[winner_idx]
             if e and e.res then return e.res end
         elseif type(winner_idx) == "string" then
-            -- MergeResult::Synthesized: a merge built fresh bytes. No
-            -- Stage 3a built-in takes this path. Returning the bytes
-            -- directly would produce a malformed memcache reply (needs
-            -- `VA <len>\r\n<bytes>\r\n` framing). Hard-fail until
-            -- Stage 3b introduces the framing alongside a merge that
-            -- actually uses it.
-            return "SERVER_ERROR synthesized merge result not supported\r\n"
+            -- MergeResult::Synthesized: the merge produced fresh bytes
+            -- (e.g. the prost-based profile UDF re-encoding a merged
+            -- protobuf). Wrap them in the meta `VA` framing the client
+            -- is expecting for `mg ... v`. The gateway does not echo
+            -- the per-pool flag set here because no single pool
+            -- "owned" the reply — the caller synthesizes and so the
+            -- gateway owns the framing too.
+            return "VA " .. #winner_idx .. "\r\n" .. winner_idx .. "\r\n"
         end
 
         -- No winner. Distinguish all-miss (a real cache miss) from

@@ -33,11 +33,33 @@ local function parse_t(line)
 end
 
 -- Build an entry from a single (key, pool, res) triple.
+--
+-- For hits, `value` is materialised eagerly: WASM merges may inspect
+-- the response body (e.g. to decode protobuf), and the Rust side has
+-- no way to reach back into the Lua userdata once projection ends.
+-- Built-in merges don't touch `value`/`line`, so the allocation here
+-- is only paid on hits (one string per pool) — memcached's Lua API
+-- allocates a fresh string on each `res:value()` call regardless.
 function M.make(key, pool_name, res)
     local status = classify(res)
-    local t
-    if status == "hit" and res and res.line then
-        t = parse_t(res:line())
+    local t, value, line
+    if status == "hit" and res then
+        line = res:line()
+        if line then t = parse_t(line) end
+        -- memcached's mcp.response has no direct value accessor. The
+        -- raw buffer is `<line>\r\n<value bytes>\r\n`; res:line()
+        -- returns just the *tail* of the header (everything after
+        -- the response code, so "VA 10 t-1\r\n" appears as "10 t-1")
+        -- which makes a line-length-based offset unreliable. Use the
+        -- known vlen() instead: the value is the last vlen bytes
+        -- before the trailing CRLF.
+        local vlen = res:vlen()
+        if vlen and vlen > 0 then
+            local raw = res:raw_string()
+            if raw and #raw >= vlen + 2 then
+                value = raw:sub(#raw - vlen - 1, #raw - 2)
+            end
+        end
     end
     return {
         key = key,
@@ -45,6 +67,8 @@ function M.make(key, pool_name, res)
         status = status,
         res = res,
         t = t,
+        value = value,
+        line = line,
     }
 end
 

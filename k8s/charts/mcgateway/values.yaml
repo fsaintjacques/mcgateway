@@ -57,5 +57,13 @@ config: |
           { prefix = "wfirst",
             read = { "mc-a", "mc-b" }, write = { "mc-a", "mc-b" },
             write_policy = "first", merge = "first-hit" },
+
+          -- Stage 3b WASM merge. `merge_profile_proto` is the file
+          -- stem of /etc/mcgateway/udf/merge_profile_proto.wasm, the
+          -- prost-based UDF that decodes a Profile protobuf from each
+          -- pool and returns the merged bytes.
+          { prefix = "profile",
+            read = { "mc-a", "mc-b" }, write = { "mc-a", "mc-b" },
+            merge = "merge_profile_proto" },
       },
   }

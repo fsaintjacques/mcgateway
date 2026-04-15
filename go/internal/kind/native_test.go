@@ -26,10 +26,11 @@ func TestNativeMergeDispatch(t *testing.T) {
 
 	got := strings.Split(resp, ",")
 	want := map[string]bool{
-		"first-hit":          true,
-		"last-write-wins":    true,
-		"pool-preferred":     true,
-		"merge_last_n_wins":  true,
+		"first-hit":           true,
+		"last-write-wins":     true,
+		"pool-preferred":      true,
+		"merge_last_n_wins":   true,
+		"merge_profile_proto": true,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("merge names: got %v, want all of %v", got, want)

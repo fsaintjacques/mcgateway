@@ -80,14 +80,18 @@ fn parse_status(s: &[u8]) -> LuaResult<Status> {
 
 /// Owned copies of the fields the Rust side reads. Borrowed `Entry`
 /// views are built from these for the merge call. `value` and `line`
-/// are not materialized yet — no built-in reads them, and the WASM
-/// host projects them directly out of the entry slice once this
-/// module starts feeding WASM merges values (step 5).
+/// are materialised eagerly when present on the Lua entry so WASM
+/// merges (e.g. protobuf decoders) can inspect the response body;
+/// built-in merges don't touch them, so the only cost is one allocation
+/// per hit, which Lua already paid to build the string in the first
+/// place.
 struct OwnedEntry {
     key: Vec<u8>,
     pool: String,
     status: Status,
     t: Option<i64>,
+    value: Option<Vec<u8>>,
+    line: Option<Vec<u8>>,
 }
 
 fn project(entries: &LuaTable) -> LuaResult<Vec<OwnedEntry>> {
@@ -99,11 +103,15 @@ fn project(entries: &LuaTable) -> LuaResult<Vec<OwnedEntry>> {
         let pool: LuaString = e.get("pool")?;
         let status: LuaString = e.get("status")?;
         let t: Option<i64> = e.get("t")?;
+        let value: Option<LuaString> = e.get("value")?;
+        let line: Option<LuaString> = e.get("line")?;
         out.push(OwnedEntry {
             key: key.as_bytes().to_vec(),
             pool: pool.to_str()?.to_string(),
             status: parse_status(&status.as_bytes())?,
             t,
+            value: value.map(|s| s.as_bytes().to_vec()),
+            line: line.map(|s| s.as_bytes().to_vec()),
         });
     }
     Ok(out)
@@ -117,8 +125,8 @@ fn as_views(owned: &[OwnedEntry]) -> Vec<Entry<'_>> {
             pool: &o.pool,
             status: o.status,
             t: o.t,
-            value: None,
-            line: None,
+            value: o.value.as_deref(),
+            line: o.line.as_deref(),
         })
         .collect()
 }
