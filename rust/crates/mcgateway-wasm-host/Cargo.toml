@@ -1,0 +1,17 @@
+[package]
+name = "mcgateway-wasm-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+mcgateway-core = { path = "../mcgateway-core" }
+wasmtime = "=43.0.1"
+
+[dev-dependencies]
+wat = "1"
+
+[lints]
+workspace = true

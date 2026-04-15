@@ -4,6 +4,7 @@ members = [
     "crates/mcgateway-core",
     "crates/mcgateway-merge-builtins",
     "crates/mcgateway-clib",
+    "crates/mcgateway-wasm-host",
 ]
 
 [workspace.package]
