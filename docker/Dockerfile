@@ -20,14 +20,29 @@ RUN ./configure --enable-proxy --prefix=/opt/memcached \
  && make -j"$(nproc)" \
  && make install
 
+# Build libmcgateway_native.so (Lua C module, loaded at proxy init time).
+# Alpine musl target matches the memcached binary's libc; undefined Lua
+# symbols in the .so are resolved by the memcached process at dlopen time.
+FROM rust:1.82-alpine3.20 AS rust-build
+
+RUN apk add --no-cache build-base
+
+WORKDIR /src/rust
+COPY rust/Cargo.toml rust/Cargo.lock* ./
+COPY rust/.cargo ./.cargo
+COPY rust/crates ./crates
+RUN cargo build --release -p mcgateway-clib
+
 # Runtime image.
 FROM alpine:3.20
 
-RUN apk add --no-cache libevent openssl \
+RUN apk add --no-cache libevent openssl libgcc \
  && addgroup -S -g 11211 memcache \
  && adduser -S -G memcache -u 11211 memcache
 
-COPY --from=build /opt/memcached/bin/memcached /usr/local/bin/memcached
+COPY --from=build      /opt/memcached/bin/memcached /usr/local/bin/memcached
+COPY --from=rust-build /src/rust/target/release/libmcgateway_native.so \
+                       /etc/mcgateway/lua/mcgateway_native.so
 
 RUN mkdir -p /etc/mcgateway/lua/mcgateway
 

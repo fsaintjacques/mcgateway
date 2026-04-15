@@ -1,4 +1,4 @@
-local merges = require("mcgateway.merges")
+local mcgw_native = require("mcgateway_native")
 
 local M = {}
 
@@ -70,7 +70,7 @@ local function validate_keyspace(ks, seen_prefix, pool_names)
     if ks.prefix:find(":", 1, true) then
         err("keyspace prefix %q must not contain ':'", ks.prefix)
     end
-    if ks.prefix == "__udf" then
+    if ks.prefix == "__udf" or ks.prefix == "__mcgw" then
         err("keyspace prefix %q is reserved", ks.prefix)
     end
     if seen_prefix[ks.prefix] then
@@ -94,7 +94,7 @@ local function validate_keyspace(ks, seen_prefix, pool_names)
     if ks.merge == nil then
         ks.merge = DEFAULT_MERGE
     end
-    if type(ks.merge) ~= "string" or not merges.lookup(ks.merge) then
+    if type(ks.merge) ~= "string" or not mcgw_native.has_merge(ks.merge) then
         err("keyspace %q: unknown merge %q", ks.prefix, tostring(ks.merge))
     end
 end

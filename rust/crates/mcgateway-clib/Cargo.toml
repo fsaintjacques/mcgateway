@@ -1,0 +1,19 @@
+[package]
+name = "mcgateway-clib"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "mcgateway_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+mcgateway-core = { path = "../mcgateway-core" }
+mcgateway-merge-builtins = { path = "../mcgateway-merge-builtins" }
+mlua = { version = "0.10", features = ["lua54", "module"] }
+
+[lints]
+workspace = true

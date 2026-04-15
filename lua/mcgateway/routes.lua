@@ -11,6 +11,7 @@
 -- (no body) can reuse r directly.
 
 local entries_mod = require("mcgateway.entries")
+local mcgw_native = require("mcgateway_native")
 
 local M = {}
 
@@ -22,7 +23,7 @@ local MISS_REPLY        = "EN\r\n"
 
 -- Read handler: fan out to M pools, build entries, run merge, return the
 -- winning entry's response (or a miss reply).
-local function make_read_handler(rctx, handles, pool_names, merge_fn, merge_flags)
+local function make_read_handler(rctx, handles, pool_names, merge_name, merge_flags)
     local n_pools = #pool_names
     return function(r)
         local key = r:key()
@@ -42,9 +43,12 @@ local function make_read_handler(rctx, handles, pool_names, merge_fn, merge_flag
         end
 
         local entries = entries_mod.build(key, pool_names, row)
-        local winner = merge_fn(entries)
-        if winner and winner.res then
-            return winner.res
+        local winner_idx = mcgw_native.merge(merge_name, entries)
+        if type(winner_idx) == "number" then
+            local e = entries[winner_idx]
+            if e and e.res then return e.res end
+        elseif type(winner_idx) == "string" then
+            return winner_idx  -- synthesized bytes; unused by Stage 3a builtins
         end
         for _, e in ipairs(entries) do
             if e.status == "miss" and e.res then return e.res end
@@ -114,11 +118,11 @@ local function read_fgen(ks)
         handles[i] = fg:new_handle(pool)
     end
     local pool_names = ks.read_names
-    local merge_fn = ks.merge_fn
+    local merge_name = ks.merge_name
     local merge_flags = ks.merge_flags or ""
     fg:ready({
         f = function(rctx)
-            return make_read_handler(rctx, handles, pool_names, merge_fn, merge_flags)
+            return make_read_handler(rctx, handles, pool_names, merge_name, merge_flags)
         end,
     })
     return fg
@@ -160,6 +164,14 @@ local function build_routers(keyspaces_built)
     local udf_err = static_fgen(UDF_NOT_SUPPORTED)
     read_map["__udf"]  = udf_err
     write_map["__udf"] = udf_err
+
+    -- __mcgw: diagnostic prefix. Reads return a single known key:
+    --   `mg __mcgw:names v` -> VA <len>\r\n<sorted merge names, comma-joined>\r\n
+    -- Used by the kind suite to confirm libmcgateway actually loaded.
+    local names_csv = table.concat(mcgw_native.names(), ",")
+    local names_reply = string.format("VA %d\r\n%s\r\n", #names_csv, names_csv)
+    read_map["__mcgw"]  = static_fgen(names_reply)
+    write_map["__mcgw"] = static_fgen(UDF_NOT_SUPPORTED)
 
     local unknown = static_fgen(UNKNOWN_KEYSPACE)
 

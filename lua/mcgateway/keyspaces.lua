@@ -1,5 +1,5 @@
 local util = require("mcgateway.util")
-local merges = require("mcgateway.merges")
+local mcgw_native = require("mcgateway_native")
 
 local M = {}
 
@@ -30,9 +30,7 @@ function M.build(keyspaces_cfg, pools_by_name)
             write_names = write_names,
             write_policy = ks.write_policy,
             merge_name = ks.merge,
-            merge_fn = assert(merges.lookup(ks.merge),
-                "unknown merge " .. tostring(ks.merge)),
-            merge_flags = merges.required_flags(ks.merge),
+            merge_flags = mcgw_native.required_flags(ks.merge),
         }
     end
     M._by_prefix = out

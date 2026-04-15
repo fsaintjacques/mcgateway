@@ -2,6 +2,7 @@
 -- decides to put its default package.path.
 local LUA_ROOT = os.getenv("MCGATEWAY_LUA_ROOT") or "/etc/mcgateway/lua"
 package.path = LUA_ROOT .. "/?.lua;" .. LUA_ROOT .. "/?/init.lua;" .. package.path
+package.cpath = LUA_ROOT .. "/?.so;" .. package.cpath
 
 local gw = require("mcgateway")
 

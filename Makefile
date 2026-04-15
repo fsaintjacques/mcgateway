@@ -1,20 +1,42 @@
-.PHONY: build check test test-kind clean \
+.PHONY: build check test test-kind clean rust-build rust-check \
         docker-build kind-up kind-down kind-load \
         helm-install-kind helm-uninstall-kind
 
 # --- Build ---
 
-build:
+build: rust-build
 	cd go && go build ./...
+
+rust-build:
+	cd rust && cargo build --release
 
 # --- Check (read-only, CI gate) ---
 
-check:
+# Lua smoke checks run under the host Lua with a fake `mcgateway_native`
+# preloaded (see test_routes.lua). The real cdylib is exercised end-to-end
+# by test-kind against the gateway image.
+LUA_CHECK_PRELUDE = package.path='lua/?.lua;lua/?/init.lua;'..package.path; \
+package.preload['mcgateway_native']=function() return { \
+  merge=function() return nil end, \
+  has_merge=function() return true end, \
+  required_flags=function() return '' end, \
+  names=function() return {'first-hit','last-write-wins','pool-preferred'} end, \
+} end; \
+mcp={pool=function() end,backend=function() end,attach=function() end,\
+funcgen_new=function() return {new_handle=function() end, ready=function() end} end,\
+router_new=function() end,request=function() end,\
+CMD_MG=1,CMD_MS=2,CMD_MD=3,WAIT_ANY=0,WAIT_GOOD=1,\
+MCMC_CODE_STORED=8,MCMC_CODE_DELETED=10,MCMC_CODE_OK=15}
+
+check: rust-check
 	@command -v lua >/dev/null 2>&1 && { \
-	  lua -e "package.path='lua/?.lua;lua/?/init.lua;'..package.path; mcp={pool=function() end,backend=function() end,attach=function() end,funcgen_new=function() return {new_handle=function() end, ready=function() end} end,router_new=function() end,request=function() end,CMD_MG=1,CMD_MS=2,CMD_MD=3,WAIT_ANY=0,WAIT_GOOD=1,MCMC_CODE_STORED=8,MCMC_CODE_DELETED=10,MCMC_CODE_OK=15}; require('mcgateway')" && \
-	  cd lua && lua tests/test_merges.lua && lua tests/test_entries.lua && lua tests/test_routes.lua; \
+	  lua -e "$(LUA_CHECK_PRELUDE); require('mcgateway')" && \
+	  cd lua && lua tests/test_entries.lua && lua tests/test_routes.lua; \
 	} || echo "skip lua tests (lua not installed)"
 	cd go && go vet -tags kind ./...
+
+rust-check:
+	cd rust && cargo test && cargo clippy --all-targets -- -D warnings
 
 # --- Test ---
 
