@@ -1,7 +1,7 @@
 # Build memcached with proxy support.
 FROM alpine:3.20 AS build
 
-ARG MEMCACHED_VERSION=1.6.32
+ARG MEMCACHED_VERSION=1.6.41
 
 RUN apk add --no-cache \
         build-base \

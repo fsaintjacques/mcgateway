@@ -10,9 +10,10 @@ build:
 # --- Check (read-only, CI gate) ---
 
 check:
-	@command -v lua >/dev/null 2>&1 && \
-	  lua -e "package.path='lua/?.lua;lua/?/init.lua;'..package.path; mcp={pool=function() end,backend=function() end,attach=function() end,funcgen_new=function() return {new_handle=function() end, ready=function() end} end,router_new=function() end,CMD_MG=1,CMD_MS=2,CMD_MD=3}; require('mcgateway')" \
-	  || echo "skip lua smoke (lua not installed)"
+	@command -v lua >/dev/null 2>&1 && { \
+	  lua -e "package.path='lua/?.lua;lua/?/init.lua;'..package.path; mcp={pool=function() end,backend=function() end,attach=function() end,funcgen_new=function() return {new_handle=function() end, ready=function() end} end,router_new=function() end,request=function() end,CMD_MG=1,CMD_MS=2,CMD_MD=3,WAIT_ANY=0,WAIT_GOOD=1,MCMC_CODE_STORED=8,MCMC_CODE_DELETED=10,MCMC_CODE_OK=15}; require('mcgateway')" && \
+	  cd lua && lua tests/test_merges.lua && lua tests/test_entries.lua && lua tests/test_routes.lua; \
+	} || echo "skip lua tests (lua not installed)"
 	cd go && go vet -tags kind ./...
 
 # --- Test ---

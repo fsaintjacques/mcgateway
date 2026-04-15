@@ -1,7 +1,13 @@
+local merges = require("mcgateway.merges")
+
 local M = {}
 
 local VALID_HASH = { xxhash = true, md5 = true, crc32 = true }
 local VALID_DIST = { ring_hash = true, jump_hash = true }
+local VALID_WRITE_POLICY = { all = true, first = true }
+
+local DEFAULT_MERGE = "first-hit"
+local DEFAULT_WRITE_POLICY = "all"
 
 local function err(fmt, ...)
     error("mcgateway config: " .. string.format(fmt, ...), 0)
@@ -31,6 +37,32 @@ local function validate_pool(p, seen)
     end
 end
 
+-- Promote a scalar pool name into a single-element list so Stage 1 configs
+-- keep loading without changes.
+local function as_pool_list(v)
+    if type(v) == "string" then return { v } end
+    return v
+end
+
+local function validate_pool_list(prefix, field, list, pool_names)
+    if type(list) ~= "table" or #list == 0 then
+        err("keyspace %q: %s must be a non-empty list of pool names", prefix, field)
+    end
+    local seen = {}
+    for i, name in ipairs(list) do
+        if type(name) ~= "string" or name == "" then
+            err("keyspace %q: %s[%d] must be a string", prefix, field, i)
+        end
+        if not pool_names[name] then
+            err("keyspace %q: %s[%d] references unknown pool %q", prefix, field, i, name)
+        end
+        if seen[name] then
+            err("keyspace %q: %s lists pool %q twice", prefix, field, name)
+        end
+        seen[name] = true
+    end
+end
+
 local function validate_keyspace(ks, seen_prefix, pool_names)
     if type(ks.prefix) ~= "string" or ks.prefix == "" then
         err("keyspace missing prefix")
@@ -45,11 +77,25 @@ local function validate_keyspace(ks, seen_prefix, pool_names)
         err("duplicate keyspace prefix %q", ks.prefix)
     end
     seen_prefix[ks.prefix] = true
-    if type(ks.read) ~= "string" or not pool_names[ks.read] then
-        err("keyspace %q: unknown read pool %q", ks.prefix, tostring(ks.read))
+
+    ks.read = as_pool_list(ks.read)
+    ks.write = as_pool_list(ks.write)
+    validate_pool_list(ks.prefix, "read", ks.read, pool_names)
+    validate_pool_list(ks.prefix, "write", ks.write, pool_names)
+
+    if ks.write_policy == nil then
+        ks.write_policy = DEFAULT_WRITE_POLICY
     end
-    if type(ks.write) ~= "string" or not pool_names[ks.write] then
-        err("keyspace %q: unknown write pool %q", ks.prefix, tostring(ks.write))
+    if not VALID_WRITE_POLICY[ks.write_policy] then
+        err("keyspace %q: invalid write_policy %q (expected 'all' or 'first')",
+            ks.prefix, tostring(ks.write_policy))
+    end
+
+    if ks.merge == nil then
+        ks.merge = DEFAULT_MERGE
+    end
+    if type(ks.merge) ~= "string" or not merges.lookup(ks.merge) then
+        err("keyspace %q: unknown merge %q", ks.prefix, tostring(ks.merge))
     end
 end
 

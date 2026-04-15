@@ -231,3 +231,70 @@ func McSet(addr, key, value string) (*McResponse, error) {
 	cmd := fmt.Sprintf("ms %s %d", key, len(value))
 	return McDo(addr, cmd, []byte(value))
 }
+
+// McSetTTL writes a value via `ms` with a TTL. Used by the LWW tests to
+// create entries with different remaining-TTL (`t`) flag values on each
+// backend. ttlSeconds must be > 0.
+func McSetTTL(addr, key, value string, ttlSeconds int) (*McResponse, error) {
+	cmd := fmt.Sprintf("ms %s %d T%d", key, len(value), ttlSeconds)
+	return McDo(addr, cmd, []byte(value))
+}
+
+// McDelete removes a key via `md`.
+func McDelete(addr, key string) (*McResponse, error) {
+	return McDo(addr, fmt.Sprintf("md %s", key), nil)
+}
+
+// RestartDeployment deletes pods matching labelSelector in ns and waits
+// until at least one replacement pod is Running. Used by scale-cleanup paths
+// to flush proxy backend connection state after a backend flapped.
+func RestartDeployment(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns, labelSelector string, timeout time.Duration) {
+	t.Helper()
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		t.Fatalf("list pods %q: %v", labelSelector, err)
+	}
+	for _, p := range pods.Items {
+		_ = cs.CoreV1().Pods(ns).Delete(ctx, p.Name, metav1.DeleteOptions{})
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		current, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err == nil {
+			running := 0
+			for _, p := range current.Items {
+				if p.Status.Phase == corev1.PodRunning && p.DeletionTimestamp == nil {
+					running++
+				}
+			}
+			if running >= 1 {
+				return
+			}
+		}
+		time.Sleep(1 * time.Second)
+	}
+	t.Fatalf("no fresh pod running for %q within %v", labelSelector, timeout)
+}
+
+// ScaleDeployment sets the replica count on a deployment and waits for the
+// observed ReadyReplicas to match. Timeout applies to the wait loop.
+func ScaleDeployment(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns, name string, replicas int32, timeout time.Duration) {
+	t.Helper()
+	scale, err := cs.AppsV1().Deployments(ns).GetScale(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get scale %s: %v", name, err)
+	}
+	scale.Spec.Replicas = replicas
+	if _, err := cs.AppsV1().Deployments(ns).UpdateScale(ctx, name, scale, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update scale %s=%d: %v", name, replicas, err)
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		dep, err := cs.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+		if err == nil && dep.Status.ReadyReplicas == replicas && dep.Status.Replicas == replicas {
+			return
+		}
+		time.Sleep(1 * time.Second)
+	}
+	t.Fatalf("deployment %s did not reach %d replicas within %v", name, replicas, timeout)
+}

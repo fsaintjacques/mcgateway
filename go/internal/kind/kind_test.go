@@ -188,12 +188,14 @@ func TestConfigReload(t *testing.T) {
 			return
 		}
 		cur.Data["config.lua"] = orig
-		s.cs.CoreV1().ConfigMaps(s.ns).Update(restoreCtx, cur, metav1.UpdateOptions{})
+		// Use helm's field manager so subsequent `helm upgrade --install`
+		// does not conflict on data.config.lua ownership.
+		s.cs.CoreV1().ConfigMaps(s.ns).Update(restoreCtx, cur, metav1.UpdateOptions{FieldManager: "helm"})
 		restartGateway(t, restoreCtx, s.cs, s.ns)
 	})
 
 	cm.Data["config.lua"] = newConfig
-	if _, err := s.cs.CoreV1().ConfigMaps(s.ns).Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+	if _, err := s.cs.CoreV1().ConfigMaps(s.ns).Update(ctx, cm, metav1.UpdateOptions{FieldManager: "helm"}); err != nil {
 		t.Fatalf("update configmap: %v", err)
 	}
 
