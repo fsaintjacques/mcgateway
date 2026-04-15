@@ -33,8 +33,20 @@ pub struct Profile {
     pub badges: Vec<String>,
 }
 
+/// Merge a keyspace of `Profile` records.
+///
+/// Tiebreak rule when two pools report identical `updated_at`
+/// timestamps: **pool order wins.** `sort_by_key` is stable, so pools
+/// earlier in the keyspace's `read:` list are placed first in the
+/// sorted sequence; the later (second) iteration overwrites the
+/// earlier on attr collisions and sets the final `user_id` /
+/// `updated_at`. This matches the "prefer the pool closer to the
+/// right of the read list when timestamps are tied" convention
+/// operators expect when scheduling a migration between pools.
 #[merge_fn(required_flags = "t")]
-#[must_use]
+// The only caller is the #[merge_fn]-generated ABI wrapper, which
+// always consumes the return. #[must_use] would be no-ops here.
+#[allow(clippy::must_use_candidate)]
 pub fn merge_profile(entries: &[Entry<'_>]) -> MergeResult {
     // Decode each hit entry's bytes into a Profile. Corrupt entries
     // are skipped with a host-side warn log; an all-corrupt read

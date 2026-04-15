@@ -186,6 +186,29 @@ fn three_pool_union_merges_attrs_and_badges() {
 }
 
 #[test]
+fn equal_updated_at_tiebreak_is_pool_order() {
+    // Two pools report identical `updated_at`; the merge must take
+    // `user_id`, colliding attrs, and the final `updated_at` from the
+    // *later* pool in the read list. Pins the documented tiebreak.
+    let (_host, merge) = load_merge();
+
+    let p1 = profile("u-from-pool-a", 100, &[("k", "from-a")], &["shared"]);
+    let p2 = profile("u-from-pool-b", 100, &[("k", "from-b")], &["only-b"]);
+    let owned = [hit("a", &p1), hit("b", &p2)];
+
+    let result = merge.run(&views(&owned)).unwrap();
+    let MergeResult::Synthesized(bytes) = result else {
+        panic!("expected Synthesized, got {result:?}");
+    };
+    let got = Profile::decode(&*bytes).expect("decode result");
+
+    assert_eq!(got.user_id, "u-from-pool-b");
+    assert_eq!(got.updated_at, 100);
+    assert_eq!(got.attrs.get("k").map(String::as_str), Some("from-b"));
+    assert_eq!(got.badges, vec!["only-b", "shared"]);
+}
+
+#[test]
 fn corrupt_payload_is_skipped_merge_still_succeeds() {
     let (_host, merge) = load_merge();
 
