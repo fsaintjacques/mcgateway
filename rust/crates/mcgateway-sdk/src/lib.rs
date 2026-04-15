@@ -34,6 +34,88 @@ use alloc::vec::Vec;
 
 pub use mcgateway_sdk_macros::merge_fn;
 
+/// Guest-side logging. Emits a message to the host's stderr via the
+/// `mcgw.log` import. The host rate-limits per merge call; excess
+/// lines are dropped silently.
+///
+/// Level is a small integer: 0=TRACE .. 4=ERROR. Use the [`trace!`],
+/// [`debug!`], [`info!`], [`warn!`], [`error!`] macros for the
+/// conventional names.
+pub mod log {
+    /// Log levels matching the host's `mcgw_log` contract.
+    #[repr(u32)]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    pub enum Level {
+        Trace = 0,
+        Debug = 1,
+        Info = 2,
+        Warn = 3,
+        Error = 4,
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    unsafe extern "C" {
+        safe fn mcgw_log(level: u32, ptr: u32, len: u32);
+    }
+
+    /// Emit `msg` at `level`. No-op on non-wasm32 targets (host
+    /// builds) since the `mcgw_log` import is unresolved there;
+    /// compiling the guest crate on the host for lint/test purposes
+    /// shouldn't have to special-case the log path.
+    ///
+    /// The cast from `usize`→`u32` is correct on wasm32 where
+    /// `usize == u32`. On other targets the cast is theoretically
+    /// lossy; the `#[allow]` is scoped to this function.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn emit(level: Level, msg: &str) {
+        let bytes = msg.as_bytes();
+        let ptr = bytes.as_ptr() as usize as u32;
+        let len = bytes.len() as u32;
+        #[cfg(target_arch = "wasm32")]
+        mcgw_log(level as u32, ptr, len);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (level, ptr, len);
+        }
+    }
+}
+
+/// `trace!("format string", args...)` — lowest severity.
+#[macro_export]
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        $crate::log::emit($crate::log::Level::Trace, &::alloc::format!($($arg)*))
+    };
+}
+/// `debug!(..)`
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        $crate::log::emit($crate::log::Level::Debug, &::alloc::format!($($arg)*))
+    };
+}
+/// `info!(..)`
+#[macro_export]
+macro_rules! info {
+    ($($arg:tt)*) => {
+        $crate::log::emit($crate::log::Level::Info, &::alloc::format!($($arg)*))
+    };
+}
+/// `warn!(..)`
+#[macro_export]
+macro_rules! warn {
+    ($($arg:tt)*) => {
+        $crate::log::emit($crate::log::Level::Warn, &::alloc::format!($($arg)*))
+    };
+}
+/// `error!(..)`
+#[macro_export]
+macro_rules! error {
+    ($($arg:tt)*) => {
+        $crate::log::emit($crate::log::Level::Error, &::alloc::format!($($arg)*))
+    };
+}
+
 /// Wire-format version understood by this SDK. Must match the host's
 /// `mcgateway_wasm_host::ABI_VERSION`; the host refuses to load a
 /// module whose `mcgw_abi_version` does not match.

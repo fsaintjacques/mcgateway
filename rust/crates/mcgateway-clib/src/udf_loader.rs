@@ -77,7 +77,7 @@ pub fn scan_dir(
             continue;
         }
 
-        match load_module(host, &path) {
+        match load_module(host, &path, &name) {
             Ok(entry) => {
                 out.insert(name, Arc::new(entry));
             }
@@ -87,10 +87,11 @@ pub fn scan_dir(
     Ok(out)
 }
 
-fn load_module(host: &WasmHost, path: &Path) -> Result<WasmEntry, String> {
+fn load_module(host: &WasmHost, path: &Path, name: &str) -> Result<WasmEntry, String> {
     let bytes = fs::read(path).map_err(|e| format!("read: {e}"))?;
     let module = host.compile(&bytes).map_err(|e| format!("compile: {e:#}"))?;
-    let merge = WasmMerge::from_module(host, module).map_err(|e| format!("instantiate: {e:#}"))?;
+    let merge = WasmMerge::from_module(host, module, name)
+        .map_err(|e| format!("instantiate: {e:#}"))?;
     let required_flags = merge.required_flags().to_owned();
     Ok(WasmEntry {
         merge: Arc::new(merge) as Arc<dyn Merge>,
