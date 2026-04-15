@@ -76,11 +76,6 @@ lua/
   examples/
     proxy.lua                example user entry point
     config.lua               example config file
-  tests/
-    test_keyspaces.lua       Lua unit tests (prefix resolution)
-    test_config.lua          Lua unit tests (config validation)
-    run.sh                   plain lua 5.4 test driver
-
 go/
   go.mod
   go.sum
@@ -319,25 +314,15 @@ Image size target: same as the base `memcached` image plus ~10KB of Lua.
 
 ## Testing
 
-Two layers: Lua unit tests for in-process logic, Go integration tests in a
-`kind` cluster for end-to-end behavior. `docker-compose` is not used —
-kind covers the same ground and reuses the infrastructure we need in later
-stages anyway.
+Integration tests in a `kind` cluster are the real tests for Stage 1.
+`docker-compose` is not used — kind covers the same ground and reuses the
+infrastructure we need in later stages anyway.
 
-### Lua unit tests
-
-Run in a plain Lua 5.4 interpreter with a stubbed `mcp` namespace. They cover:
-
-- Key parsing and prefix resolution (hit, miss, empty key, missing `:`).
-- Config validation (well-formed, duplicate names, unknown pool reference,
-  reserved prefix).
-- Handler dispatch given a mocked request object.
-
-`lua/tests/run.sh` sets `LUA_PATH` to point at `lua/` and invokes each
-`test_*.lua` file. Exit non-zero on any failure. No external dependencies
-beyond `lua5.4`.
-
-Invoked by `make test-unit`.
+A lightweight syntax smoke check (`lua5.4 -e "package.path='lua/?.lua;'..package.path; require('mcgateway')"`)
+runs as part of `make check` so broken syntax is caught without spinning up a
+cluster. Real behavior is covered by the Go kind tests below. Unit tests for
+pure Lua logic will reappear in later stages if/when there is logic worth
+testing outside of an integration path; in Stage 1 there isn't.
 
 ### Go integration tests (kind)
 
@@ -382,7 +367,7 @@ The top-level `Makefile` mirrors mcfreeze's structure and target names.
 Stage 1 needs a small subset; later stages add to it.
 
 ```make
-.PHONY: build test test-unit test-kind clean \
+.PHONY: build test check test-kind clean \
         docker-build kind-up kind-down kind-load \
         helm-install-kind helm-uninstall-kind
 
@@ -393,11 +378,11 @@ build:
 
 # --- Test ---
 
-test: test-unit test-kind
+test: check test-kind
 
-test-unit:
-	bash lua/tests/run.sh
-	cd go && go test ./...
+check:
+	lua5.4 -e "package.path='lua/?.lua;lua/?/init.lua;'..package.path; require('mcgateway')"
+	cd go && go vet ./...
 
 test-kind: helm-install-kind
 	kind export kubeconfig --name $(KIND_CLUSTER_NAME)
@@ -461,9 +446,9 @@ make kind-up                 # one-time per dev session
 make test-kind               # build image, load, install chart, run Go tests
 ```
 
-Stage 1 adds `test-unit`, `test-kind`, and the KIND/helm targets. Stages 2+
-add `format`, `lint`, `check`, `generate` (CRD codegen), and eventually
-`test-gke`, mirroring mcfreeze's full Makefile shape as the project grows.
+Stage 1 adds `check`, `test-kind`, and the KIND/helm targets. Stages 2+
+add `format`, `lint`, `generate` (CRD codegen), and eventually `test-gke`,
+mirroring mcfreeze's full Makefile shape as the project grows.
 
 ---
 
@@ -473,17 +458,15 @@ Stage 1 is done when all of the following are true:
 
 1. `make kind-up && make test-kind` is green on a fresh machine (Linux or
    macOS, with either docker or podman).
-2. Lua unit tests pass via `make test-unit`: config validation and prefix
-   resolution covered.
-3. Go kind tests pass: all six cases in the table above — per-keyspace
+2. Go kind tests pass: all six cases in the table above — per-keyspace
    routing for reads/writes, unknown prefix rejection, reserved `__udf:`
    rejection, and ConfigMap-driven config reload.
-4. The Helm chart installs cleanly on kind and produces a ready gateway
+3. The Helm chart installs cleanly on kind and produces a ready gateway
    pod plus two backend pods within one minute.
-5. `make docker-build` produces an image that runs on both docker and
+4. `make docker-build` produces an image that runs on both docker and
    podman.
 
-Once all five hold, Stage 2 can begin.
+Once all four hold, Stage 2 can begin.
 
 ---
 

@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcgateway
+  labels:
+    {{- include "mcgateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "mcgateway.name" . }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "mcgateway.labels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+      annotations:
+        # Force pod restart when config changes.
+        checksum/config: {{ .Values.config | sha256sum }}
+    spec:
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: memcache
+              containerPort: {{ .Values.gateway.port }}
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: memcache
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            tcpSocket:
+              port: memcache
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mcgateway/config.lua
+              subPath: config.lua
+      volumes:
+        - name: config
+          configMap:
+            name: mcgateway-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcgateway
+  labels:
+    {{- include "mcgateway.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "mcgateway.name" . }}
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: memcache
+      port: {{ .Values.gateway.port }}
+      targetPort: memcache
+      protocol: TCP

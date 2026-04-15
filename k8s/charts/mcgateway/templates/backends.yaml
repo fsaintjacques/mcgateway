@@ -1,0 +1,53 @@
+{{- if .Values.backends.enabled }}
+{{- range $i, $b := .Values.backends.instances }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $b.name }}
+  labels:
+    {{- include "mcgateway.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: backend
+    mcgateway.io/backend: {{ $b.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      mcgateway.io/backend: {{ $b.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcgateway.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: backend
+        mcgateway.io/backend: {{ $b.name }}
+    spec:
+      containers:
+        - name: memcached
+          image: "{{ $.Values.backends.image.repository }}:{{ $.Values.backends.image.tag }}"
+          imagePullPolicy: {{ $.Values.backends.image.pullPolicy }}
+          args: ["-l", "0.0.0.0"]
+          ports:
+            - name: memcache
+              containerPort: 11211
+          readinessProbe:
+            tcpSocket:
+              port: memcache
+            periodSeconds: 2
+            failureThreshold: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $b.name }}
+  labels:
+    {{- include "mcgateway.labels" $ | nindent 4 }}
+    mcgateway.io/backend: {{ $b.name }}
+spec:
+  selector:
+    mcgateway.io/backend: {{ $b.name }}
+  ports:
+    - name: memcache
+      port: 11211
+      targetPort: memcache
+{{- end }}
+{{- end }}

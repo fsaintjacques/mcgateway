@@ -1,0 +1,11 @@
+image:
+  repository: localhost/mcgateway
+  tag: dev
+  pullPolicy: Never
+
+backends:
+  enabled: true
+  image:
+    repository: memcached
+    tag: "1.6.32-alpine"
+    pullPolicy: IfNotPresent

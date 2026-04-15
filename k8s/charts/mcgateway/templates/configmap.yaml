@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcgateway-config
+  labels:
+    {{- include "mcgateway.labels" . | nindent 4 }}
+data:
+  config.lua: |
+{{ .Values.config | indent 4 }}
