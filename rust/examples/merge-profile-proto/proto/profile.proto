@@ -1,0 +1,14 @@
+// Reference schema for the merge-profile-proto UDF. The Rust side
+// declares an equivalent `Profile` struct using prost derive macros
+// (see src/lib.rs) to avoid a protoc build dependency. Keep this
+// file in sync with that declaration.
+syntax = "proto3";
+
+package mcgateway.test;
+
+message Profile {
+  string user_id = 1;
+  int64 updated_at = 2;
+  map<string, string> attrs = 3;
+  repeated string badges = 4;
+}

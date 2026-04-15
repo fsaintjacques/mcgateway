@@ -53,8 +53,14 @@ pub mod log {
         Error = 4,
     }
 
+    // Import the host's `mcgw.log` function. The `wasm_import_module`
+    // attribute pins the module name the wasm linker writes into the
+    // import section; without it rustc defaults to "env" and the host
+    // won't resolve it.
     #[cfg(target_arch = "wasm32")]
+    #[link(wasm_import_module = "mcgw")]
     unsafe extern "C" {
+        #[link_name = "log"]
         safe fn mcgw_log(level: u32, ptr: u32, len: u32);
     }
 
