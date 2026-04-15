@@ -48,7 +48,13 @@ local function make_read_handler(rctx, handles, pool_names, merge_name, merge_fl
             local e = entries[winner_idx]
             if e and e.res then return e.res end
         elseif type(winner_idx) == "string" then
-            return winner_idx  -- synthesized bytes; unused by Stage 3a builtins
+            -- MergeResult::Synthesized: a merge built fresh bytes. No
+            -- Stage 3a built-in takes this path. Returning the bytes
+            -- directly would produce a malformed memcache reply (needs
+            -- `VA <len>\r\n<bytes>\r\n` framing). Hard-fail until
+            -- Stage 3b introduces the framing alongside a merge that
+            -- actually uses it.
+            return "SERVER_ERROR synthesized merge result not supported\r\n"
         end
         for _, e in ipairs(entries) do
             if e.status == "miss" and e.res then return e.res end
