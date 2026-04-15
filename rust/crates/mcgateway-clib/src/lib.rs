@@ -37,7 +37,7 @@ use crate::registries::Registries;
 
 fn build_registries() -> LuaResult<Arc<Registries>> {
     let mut builtins = Registry::new();
-    mcgateway_merge_builtins::register(&mut builtins);
+    mcgateway_core::builtins::register(&mut builtins);
     let registries = Arc::new(Registries::new(builtins));
 
     // Discover WASM modules on disk. Failure to read the directory —

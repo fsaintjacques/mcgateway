@@ -12,7 +12,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 mcgateway-core = { path = "../mcgateway-core" }
-mcgateway-merge-builtins = { path = "../mcgateway-merge-builtins" }
 mcgateway-wasm-host = { path = "../mcgateway-wasm-host" }
 mlua = { version = "0.10", features = ["lua54", "module"] }
 arc-swap = "1"

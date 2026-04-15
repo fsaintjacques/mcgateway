@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use mcgateway_core::{Entry, Merge, MergeResult, Registry, Status};
+use crate::{Entry, Merge, MergeResult, Registry, Status};
 
 /// Return the first entry whose status is [`Status::Hit`].
 pub struct FirstHit;
@@ -19,8 +19,8 @@ impl Merge for FirstHit {
     }
 }
 
-/// Identical to [`FirstHit`] given the pool-order contract; exposed under a
-/// distinct name for intent at the config call site.
+/// Identical to [`FirstHit`] given the pool-order contract; exposed
+/// under a distinct name for intent at the config call site.
 pub struct PoolPreferred;
 
 impl Merge for PoolPreferred {
@@ -30,8 +30,8 @@ impl Merge for PoolPreferred {
 }
 
 /// Pick the hit entry with the greatest `t` flag (remaining TTL in
-/// seconds). Entries without `t` never displace a hit that has one; ties
-/// keep the earlier index (stable).
+/// seconds). Entries without `t` never displace a hit that has one;
+/// ties keep the earlier index (stable).
 ///
 /// **Important — `t` is remaining TTL, not a write timestamp.** This
 /// merge behaves as "last-write-wins" only under the operator-maintained
@@ -91,13 +91,34 @@ mod tests {
     use super::*;
 
     fn hit(pool: &'static str, t: Option<i64>) -> Entry<'static> {
-        Entry { key: b"k", pool, status: Status::Hit, t, value: None, line: None }
+        Entry {
+            key: b"k",
+            pool,
+            status: Status::Hit,
+            t,
+            value: None,
+            line: None,
+        }
     }
     fn miss(pool: &'static str) -> Entry<'static> {
-        Entry { key: b"k", pool, status: Status::Miss, t: None, value: None, line: None }
+        Entry {
+            key: b"k",
+            pool,
+            status: Status::Miss,
+            t: None,
+            value: None,
+            line: None,
+        }
     }
     fn err(pool: &'static str) -> Entry<'static> {
-        Entry { key: b"k", pool, status: Status::Error, t: None, value: None, line: None }
+        Entry {
+            key: b"k",
+            pool,
+            status: Status::Error,
+            t: None,
+            value: None,
+            line: None,
+        }
     }
 
     fn pick(r: &MergeResult) -> Option<usize> {

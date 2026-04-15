@@ -12,6 +12,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+pub mod builtins;
+
 /// Outcome of a per-pool read, classified by the gateway before the merge
 /// sees it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

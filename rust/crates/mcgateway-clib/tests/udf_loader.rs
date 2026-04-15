@@ -54,7 +54,7 @@ fn mk_bad_abi_wasm() -> Vec<u8> {
 
 fn build_registries_with_builtins() -> Registries {
     let mut builtins = Registry::new();
-    mcgateway_merge_builtins::register(&mut builtins);
+    mcgateway_core::builtins::register(&mut builtins);
     Registries::new(builtins)
 }
 

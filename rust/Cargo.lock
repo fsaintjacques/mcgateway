@@ -1092,7 +1092,6 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "mcgateway-core",
- "mcgateway-merge-builtins",
  "mcgateway-wasm-host",
  "mlua",
  "tempfile",
@@ -1102,13 +1101,6 @@ dependencies = [
 [[package]]
 name = "mcgateway-core"
 version = "0.1.0"
-
-[[package]]
-name = "mcgateway-merge-builtins"
-version = "0.1.0"
-dependencies = [
- "mcgateway-core",
-]
 
 [[package]]
 name = "mcgateway-sdk"
