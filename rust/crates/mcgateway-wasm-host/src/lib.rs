@@ -22,7 +22,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use mcgateway_core::{Entry, Merge, MergeResult};
 use wasmtime::{
@@ -82,6 +82,11 @@ pub const TICK_INTERVAL_MS: u64 = 10;
 /// Stage 6 structured logging.
 pub const LOG_BUDGET_PER_CALL: u32 = 16;
 
+/// Maximum size of a single `mcgw_log` message. Guest-supplied `len`
+/// is untrusted; without this cap a malicious guest could force the
+/// host to allocate multiple gigabytes per call.
+pub const LOG_MAX_BYTES: u32 = 4096;
+
 macro_rules! werr {
     ($($arg:tt)*) => { Error::msg(format!($($arg)*)) };
 }
@@ -109,12 +114,17 @@ impl MergeStoreData {
 /// The ticker signals the engine's epoch counter every
 /// [`TICK_INTERVAL_MS`], which wasmtime combines with each store's
 /// per-call `set_epoch_deadline` to trap runaway guests.
+///
+/// The host is cheap to clone (`Arc` inside): every clone shares the
+/// same engine and the same ticker. The ticker thread only exits when
+/// the last clone is dropped.
+#[derive(Clone)]
 pub struct WasmHost {
     engine: Engine,
-    // Option so we can take() on drop to join the ticker cleanly. The
-    // handle keeps the ticker thread alive; dropping it sets the stop
-    // flag and the thread exits before the join returns.
-    ticker: Option<TickerHandle>,
+    // Shared via Arc so clones of WasmHost don't each spawn their own
+    // ticker, and the ticker only stops on the drop of the last
+    // reference. TickerHandle's Drop impl sets the stop flag and joins.
+    _ticker: Arc<TickerHandle>,
 }
 
 struct TickerHandle {
@@ -161,7 +171,7 @@ impl WasmHost {
         let ticker = spawn_ticker(engine.clone());
         Ok(Self {
             engine,
-            ticker: Some(ticker),
+            _ticker: Arc::new(ticker),
         })
     }
 
@@ -187,14 +197,6 @@ impl WasmHost {
     }
 }
 
-impl Drop for WasmHost {
-    fn drop(&mut self) {
-        // Explicit drop order: ticker first (which joins the thread),
-        // then engine goes with `self`.
-        self.ticker.take();
-    }
-}
-
 /// Build a linker populated with WASI preview1 and the `mcgw.log`
 /// import. Shared between the load-time probe and per-call
 /// instantiation so both wire the same host surface.
@@ -215,7 +217,11 @@ fn build_linker(engine: &Engine) -> Result<Linker<MergeStoreData>> {
             else {
                 return;
             };
-            let mut buf = vec![0u8; len as usize];
+            // Cap untrusted guest len: a malicious module could pass
+            // u32::MAX and force a multi-gigabyte per-call allocation.
+            // Truncated messages are fine for diagnostic logs.
+            let len = len.min(LOG_MAX_BYTES) as usize;
+            let mut buf = vec![0u8; len];
             if memory.read(&caller, ptr as usize, &mut buf).is_err() {
                 return;
             }
@@ -250,6 +256,11 @@ pub struct WasmMerge {
     module_name: Arc<str>,
     required_flags: String,
     deadline_ticks: u64,
+    // Built once at load time and reused across all calls. A Linker
+    // depends only on the Engine, so the same instance is safe to
+    // share across stores; per-call rebuild would re-register every
+    // WASI preview1 import on each merge.
+    linker: Linker<MergeStoreData>,
 }
 
 fn default_deadline_ticks() -> u64 {
@@ -274,7 +285,8 @@ impl WasmMerge {
         store.set_epoch_deadline(u64::MAX / 2);
         store.epoch_deadline_trap();
         let linker = build_linker(&engine)?;
-        let instance = linker.instantiate(&mut store, &module)?;
+        let instance = linker.instantiate(&mut store, &module)
+            .map_err(|e| e.context("instantiate module"))?;
 
         let abi_version: TypedFunc<(), u32> = instance
             .get_typed_func(&mut store, "mcgw_abi_version")
@@ -307,6 +319,7 @@ impl WasmMerge {
             module_name,
             required_flags,
             deadline_ticks: default_deadline_ticks(),
+            linker,
         })
     }
 
@@ -330,9 +343,10 @@ impl WasmMerge {
     /// deadline, and encoding failures are returned as `Err`; the
     /// [`Merge::apply`] impl maps them all to `MergeResult::Miss`.
     pub fn run(&self, entries: &[Entry<'_>]) -> Result<MergeResult> {
-        run(
+        run_with_linker(
             &self.engine,
             &self.module,
+            &self.linker,
             self.module_name.clone(),
             self.deadline_ticks,
             entries,
@@ -378,12 +392,13 @@ impl Merge for WasmMerge {
     }
 }
 
-/// Execute one merge call. Exposed so tests can construct a bare
-/// [`Module`] from a `.wat` fixture without going through
-/// [`WasmMerge::from_module`] (which enforces the full ABI handshake).
-pub fn run(
+/// Execute one merge call against a pre-built linker. Factored out
+/// so [`WasmMerge::run`] and the test helpers can both drive the
+/// full marshal → invoke → decode path.
+fn run_with_linker(
     engine: &Engine,
     module: &Module,
+    linker: &Linker<MergeStoreData>,
     name: Arc<str>,
     deadline_ticks: u64,
     entries: &[Entry<'_>],
@@ -392,7 +407,6 @@ pub fn run(
     store.set_epoch_deadline(deadline_ticks);
     store.epoch_deadline_trap();
 
-    let linker = build_linker(engine)?;
     let instance = linker.instantiate(&mut store, module)?;
 
     let memory = instance
@@ -420,11 +434,21 @@ pub fn run(
     }
 }
 
-/// Test-only helper kept for backwards-compat with fixtures.rs. Uses
-/// a generous 1000-tick deadline and a "<test>" module name.
+/// Test-only helper: builds a fresh linker and runs the merge with a
+/// generous 1000-tick deadline under a "<test>" module name. Used by
+/// the `.wat` fixtures that exercise `run` directly without going
+/// through [`WasmMerge::from_module`].
 #[doc(hidden)]
 pub fn run_test(engine: &Engine, module: &Module, entries: &[Entry<'_>]) -> Result<MergeResult> {
-    run(engine, module, Arc::from("<test>"), 1000, entries)
+    let linker = build_linker(engine)?;
+    run_with_linker(
+        engine,
+        module,
+        &linker,
+        Arc::from("<test>"),
+        1000,
+        entries,
+    )
 }
 
 struct EncodedEntries {
@@ -588,10 +612,3 @@ fn decode_result(
     }
 }
 
-/// Helper so callers can observe elapsed wall time in tests without
-/// importing `Instant` themselves.
-#[doc(hidden)]
-#[must_use]
-pub fn now() -> Instant {
-    Instant::now()
-}

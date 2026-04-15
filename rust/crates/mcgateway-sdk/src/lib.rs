@@ -62,20 +62,19 @@ pub mod log {
     /// builds) since the `mcgw_log` import is unresolved there;
     /// compiling the guest crate on the host for lint/test purposes
     /// shouldn't have to special-case the log path.
-    ///
-    /// The cast from `usize`→`u32` is correct on wasm32 where
-    /// `usize == u32`. On other targets the cast is theoretically
-    /// lossy; the `#[allow]` is scoped to this function.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn emit(level: Level, msg: &str) {
-        let bytes = msg.as_bytes();
-        let ptr = bytes.as_ptr() as usize as u32;
-        let len = bytes.len() as u32;
         #[cfg(target_arch = "wasm32")]
-        mcgw_log(level as u32, ptr, len);
+        {
+            // `usize == u32` on wasm32; the cast is exact.
+            #[allow(clippy::cast_possible_truncation)]
+            let ptr = msg.as_ptr() as usize as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let len = msg.len() as u32;
+            mcgw_log(level as u32, ptr, len);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let _ = (level, ptr, len);
+            let _ = (level, msg);
         }
     }
 }
