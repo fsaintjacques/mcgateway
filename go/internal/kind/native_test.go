@@ -12,6 +12,10 @@ import (
 // TestNativeMergeDispatch proves libmcgateway_native.so loaded and is
 // serving merge dispatch. A failure here almost always means the cdylib
 // didn't make it into the image or couldn't be dlopened by the proxy.
+//
+// Also asserts the example WASM UDF baked into /etc/mcgateway/udf by
+// the Dockerfile is registered — proves the Stage 3b UdfLoader walked
+// the directory at startup and wasmtime accepted the module.
 func TestNativeMergeDispatch(t *testing.T) {
 	s := newSuite(t)
 
@@ -22,9 +26,10 @@ func TestNativeMergeDispatch(t *testing.T) {
 
 	got := strings.Split(resp, ",")
 	want := map[string]bool{
-		"first-hit":       true,
-		"last-write-wins": true,
-		"pool-preferred":  true,
+		"first-hit":          true,
+		"last-write-wins":    true,
+		"pool-preferred":     true,
+		"merge_last_n_wins":  true,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("merge names: got %v, want all of %v", got, want)
