@@ -209,6 +209,12 @@ pub mod __rt {
     }
 
     fn encode_synthesized(bytes: &[u8]) -> u64 {
+        // Rust's wasm32 default allocator aborts the guest on OOM rather
+        // than returning null. We rely on that: any failure path traps
+        // cleanly inside wasmtime and the host surfaces it as Miss. If a
+        // future guest swaps in a fallible allocator, these writes would
+        // need a null-check branch that returns a GuestError-tagged
+        // result.
         let len = bytes.len();
         let payload_layout = layout(len as u32, 1);
         let payload = unsafe { alloc(payload_layout) };

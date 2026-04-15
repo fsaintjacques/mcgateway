@@ -8,6 +8,7 @@ members = [
     "crates/mcgateway-sdk",
     "crates/mcgateway-sdk-macros",
     "examples/merge-last-n-wins",
+    "examples/merge-concat-values",
 ]
 
 [workspace.package]
