@@ -19,6 +19,7 @@ local UNKNOWN_KEYSPACE  = "SERVER_ERROR unknown keyspace\r\n"
 local UDF_NOT_SUPPORTED = "SERVER_ERROR udf not supported\r\n"
 local MULTIKEY_UNSUPPORTED = "SERVER_ERROR multi-key not supported\r\n"
 local NO_BACKENDS       = "SERVER_ERROR no backends available\r\n"
+local ALL_READ_ERR      = "SERVER_ERROR all backends failed\r\n"
 local MISS_REPLY        = "EN\r\n"
 
 -- Read handler: fan out to M pools, build entries, run merge, return the
@@ -56,18 +57,35 @@ local function make_read_handler(rctx, handles, pool_names, merge_name, merge_fl
             -- actually uses it.
             return "SERVER_ERROR synthesized merge result not supported\r\n"
         end
+
+        -- No winner. Distinguish all-miss (a real cache miss) from
+        -- all-error (every backend failed). Prefer a concrete miss
+        -- response from any backend; fall back to a synthesised `EN` if
+        -- at least one backend explicitly missed. Only when every entry
+        -- is an error do we surface an error — returning a miss there
+        -- would mask backend outages as a not-found.
+        local any_miss, concrete_error = false, nil
         for _, e in ipairs(entries) do
-            if e.status == "miss" and e.res then return e.res end
+            if e.status == "miss" then
+                any_miss = true
+                if e.res then return e.res end
+            elseif e.status == "error" and e.res and concrete_error == nil then
+                concrete_error = e.res
+            end
         end
-        for _, e in ipairs(entries) do
-            if e.res then return e.res end
-        end
-        return MISS_REPLY
+        if any_miss then return MISS_REPLY end
+        if concrete_error then return concrete_error end
+        return ALL_READ_ERR
     end
 end
 
 -- Pick the "strongest negative" among write responses.
 --   error > not-stored (NS/EX/NF etc) > stored (HD/OK/STORED)
+--
+-- Ties within a rank prefer a concrete (non-nil) response: a transport
+-- failure on one pool should not suppress another pool's concrete
+-- SERVER_ERROR/NS/EX. Only when every pool had a nil response do we
+-- fall back to the generic "no backends available".
 local function reduce_write_all(rctx, handles)
     local worst, worst_rank = nil, -1
     for _, h in ipairs(handles) do
@@ -84,6 +102,8 @@ local function reduce_write_all(rctx, handles)
         end
         if rank > worst_rank then
             worst, worst_rank = res, rank
+        elseif rank == worst_rank and worst == nil and res ~= nil then
+            worst = res
         end
     end
     if worst then return worst end

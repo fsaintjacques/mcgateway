@@ -29,10 +29,12 @@ CMD_MG=1,CMD_MS=2,CMD_MD=3,WAIT_ANY=0,WAIT_GOOD=1,\
 MCMC_CODE_STORED=8,MCMC_CODE_DELETED=10,MCMC_CODE_OK=15}
 
 check: rust-check
-	@command -v lua >/dev/null 2>&1 && { \
+	@if command -v lua >/dev/null 2>&1; then \
 	  lua -e "$(LUA_CHECK_PRELUDE); require('mcgateway')" && \
 	  cd lua && lua tests/test_entries.lua && lua tests/test_routes.lua; \
-	} || echo "skip lua tests (lua not installed)"
+	else \
+	  echo "skip lua tests (lua not installed)"; \
+	fi
 	cd go && go vet -tags kind ./...
 
 rust-check:

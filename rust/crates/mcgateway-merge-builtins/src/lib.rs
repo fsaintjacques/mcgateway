@@ -29,8 +29,25 @@ impl Merge for PoolPreferred {
     }
 }
 
-/// Pick the hit entry with the greatest `t` flag. Entries without `t` never
-/// displace a hit that has one; ties keep the earlier index (stable).
+/// Pick the hit entry with the greatest `t` flag (remaining TTL in
+/// seconds). Entries without `t` never displace a hit that has one; ties
+/// keep the earlier index (stable).
+///
+/// **Important — `t` is remaining TTL, not a write timestamp.** This
+/// merge behaves as "last-write-wins" only under the operator-maintained
+/// invariant that every pool writes items with the same initial TTL.
+/// Under that invariant, a larger remaining `t` means less time has
+/// elapsed since the write, which means the item was written more
+/// recently. If pools have heterogeneous TTL policies (e.g. one pool
+/// uses a 1h TTL and another a 24h TTL), this merge will return the
+/// entry with the longer TTL regardless of recency, and its name is a
+/// lie.
+///
+/// Memcached's meta protocol does not expose a write timestamp. A real
+/// LWW would need an out-of-band version (e.g. a CAS-like token
+/// consistent across pools) carried in the value itself or in a custom
+/// meta flag — both of which are application-level choices beyond this
+/// merge's scope.
 pub struct LastWriteWins;
 
 impl Merge for LastWriteWins {
