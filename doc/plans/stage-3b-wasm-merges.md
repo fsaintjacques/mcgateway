@@ -181,12 +181,16 @@ C-shape is `repr(C)`-compatible.
 tag: u8 in the low byte
   0 = Miss           — remaining bits ignored
   1 = Winner(u32)    — index in the high 32 bits
-  2 = Synthesized    — ptr:u32 in bits 8..40, len:u32 in bits 40..64
+  2 = Synthesized    — desc_ptr:u32 in the high 32 bits, pointing to an
+                       8-byte {ptr:u32, len:u32} descriptor in guest memory
   0xFF = GuestError  — low 8 bits = tag, next 8 bits = error code
 ```
 
-Synthesized buffers live in guest memory; the host copies them out and
-then `mcgw_dealloc`'s. No ownership crosses the boundary.
+The Synthesized path uses a descriptor indirection rather than packing
+`(ptr, len)` directly into the u64 so length is not capped at 24 bits
+(full u32 works). Synthesized buffers live in guest memory; the host
+copies them out and `mcgw_dealloc`'s both the payload and the
+descriptor. No ownership crosses the boundary.
 
 **Why this shape and not wit/component-model.** Component Model buys us
 nominally-typed interfaces across languages we don't ship today, at the

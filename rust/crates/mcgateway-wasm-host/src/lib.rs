@@ -16,8 +16,6 @@
 //! live elsewhere; this crate is intentionally unaware of the SDK so the
 //! boundary stays reviewable as wire format, not Rust types.
 
-use std::sync::Arc;
-
 use mcgateway_core::{Entry, Merge, MergeResult};
 use wasmtime::{Config, Engine, Error, Instance, Linker, Memory, Module, Result, Store, TypedFunc};
 
@@ -219,7 +217,18 @@ pub fn run(engine: &Engine, module: &Module, entries: &[Entry<'_>]) -> Result<Me
     let result = decode_result(&mut store, &memory, &dealloc, packed)?;
 
     dealloc.call(&mut store, (encoded.ptr, encoded.total_size, 8))?;
-    Ok(result)
+
+    // Degrade out-of-range Winner indices to Miss: the caller would
+    // otherwise index past the entries slice. We treat this as a
+    // malformed guest, not a hard error — surfacing the value lets
+    // WasmMerge::apply log it via the existing Err → Miss path.
+    match result {
+        MergeResult::Winner(i) if i >= entries.len() => Err(werr!(
+            "guest returned out-of-range winner index {i} (entries={})",
+            entries.len()
+        )),
+        other => Ok(other),
+    }
 }
 
 struct EncodedEntries {
@@ -240,7 +249,12 @@ impl EncodedEntries {
 
         // Two-phase: guest-allocate each entry's variable-length fields,
         // then the entry array referencing those pointers. N+1 allocs
-        // per merge; fine at merge-scale.
+        // per merge; fine at merge-scale. Per-field buffers are *not*
+        // individually `mcgw_dealloc`'d after the call; the per-call
+        // `Store` drops linear memory wholesale when `run` returns, so
+        // the dealloc would be redundant. Only the entry-array buffer
+        // itself is freed (to exercise the guest's free-list bookkeeping
+        // and catch allocator bugs early).
         let mut field_allocs: Vec<FieldPtrs> = Vec::with_capacity(entries.len());
         for e in entries {
             field_allocs.push(FieldPtrs::write(store, memory, alloc, e)?);
@@ -382,8 +396,9 @@ fn decode_result(
     }
 }
 
-/// Arc wrapper so `Registry` can store trait objects uniformly.
-#[must_use]
-pub fn into_merge(merge: WasmMerge) -> Arc<dyn Merge> {
-    Arc::new(merge)
-}
+// A public `Arc<dyn Merge>` constructor is intentionally deferred: the
+// Merge::required_flags signature is `&'static str`, but WasmMerge's
+// flags are dynamic. Exposing a bare conversion today would silently
+// drop per-module flags through trait-object dispatch. Step 3's
+// UdfLoader introduces a wrapper that resolves required_flags from its
+// own table and then hands the registry a correct trait object.

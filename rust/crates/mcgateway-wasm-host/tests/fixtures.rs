@@ -95,6 +95,51 @@ fn bad_abi_is_rejected_at_load() {
 }
 
 #[test]
+fn synthesized_fixture_returns_bytes() {
+    let host = WasmHost::new().unwrap();
+    let module = host.compile(&load("synthesized.wat")).unwrap();
+    let owned = sample_entries();
+    let entries = views(&owned);
+    let result = run(host.engine(), &module, &entries).unwrap();
+    match result {
+        MergeResult::Synthesized(b) => assert_eq!(b, b"hello"),
+        other => panic!("expected Synthesized, got {other:?}"),
+    }
+}
+
+#[test]
+fn guest_error_fixture_run_returns_err_merge_returns_miss() {
+    let host = WasmHost::new().unwrap();
+    let module = host.compile(&load("guest_error.wat")).unwrap();
+    let owned = sample_entries();
+    let entries = views(&owned);
+    let err = run(host.engine(), &module, &entries).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("error code 7"),
+        "expected error code 7, got: {err:#}"
+    );
+
+    let merge = WasmMerge::from_module(&host, module).unwrap();
+    assert!(matches!(merge.apply(&entries), MergeResult::Miss));
+}
+
+#[test]
+fn winner_out_of_range_is_rejected() {
+    let host = WasmHost::new().unwrap();
+    let module = host.compile(&load("winner_out_of_range.wat")).unwrap();
+    let owned = sample_entries(); // 3 entries, guest claims index 999
+    let entries = views(&owned);
+    let err = run(host.engine(), &module, &entries).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("out-of-range winner"),
+        "expected out-of-range error, got: {err:#}"
+    );
+
+    let merge = WasmMerge::from_module(&host, module).unwrap();
+    assert!(matches!(merge.apply(&entries), MergeResult::Miss));
+}
+
+#[test]
 fn empty_entries_still_round_trip() {
     let host = WasmHost::new().unwrap();
     let module = host.compile(&load("miss.wat")).unwrap();
