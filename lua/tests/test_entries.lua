@@ -58,6 +58,37 @@ do
           "nil response cells classified as error")
 end
 
+-- value extraction: the last vlen bytes before the trailing CRLF. Pins the
+-- `#raw - vlen - 1 .. #raw - 2` slice against accidental off-by-ones; a
+-- regression here silently corrupts bytes shipped to WASM merges.
+do
+    local function hit_res(raw, vlen, line) return {
+        ok=function() return true end,
+        hit=function() return true end,
+        line=function() return line end,
+        vlen=function() return vlen end,
+        raw_string=function() return raw end,
+    } end
+    -- `VA 3 t-1\r\nabc\r\n`: line is "3 t-1" (mcmc strips the code),
+    -- vlen is 3, raw is the full buffer. Value should be "abc".
+    local raw = "VA 3 t-1\r\nabc\r\n"
+    local res = hit_res(raw, 3, "3 t-1")
+    local e = entries.make("user:1", "a", res)
+    check(e.status == "hit", "hit entry classified as hit")
+    check(e.value == "abc", "value extraction picks up 'abc'")
+    check(e.t == -1, "parsed t=-1 from line")
+
+    -- Binary payload (protobuf-ish: starts with 0x0A, contains 0x00).
+    local bin = "\x0A\x06\x00\x01\x02\x03\x04\x05"
+    local raw2 = "VA " .. #bin .. "\r\n" .. bin .. "\r\n"
+    local e2 = entries.make("k", "b", hit_res(raw2, #bin, tostring(#bin)))
+    check(e2.value == bin, "value extraction preserves binary bytes")
+
+    -- Missing raw: value stays nil, status is still hit.
+    local e3 = entries.make("k", "c", hit_res(nil, 3, "3"))
+    check(e3.value == nil, "missing raw_string yields nil value")
+end
+
 if failed > 0 then
     io.stderr:write(string.format("%d test(s) failed\n", failed))
     os.exit(1)

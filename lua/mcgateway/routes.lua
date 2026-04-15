@@ -52,10 +52,17 @@ local function make_read_handler(rctx, handles, pool_names, merge_name, merge_fl
             -- MergeResult::Synthesized: the merge produced fresh bytes
             -- (e.g. the prost-based profile UDF re-encoding a merged
             -- protobuf). Wrap them in the meta `VA` framing the client
-            -- is expecting for `mg ... v`. The gateway does not echo
-            -- the per-pool flag set here because no single pool
-            -- "owned" the reply — the caller synthesizes and so the
-            -- gateway owns the framing too.
+            -- is expecting for `mg ... v`.
+            --
+            -- TODO: if a merge declares `required_flags` *and* returns
+            -- Synthesized, any flags the client asked for (t/c/s/…)
+            -- need to be echoed here or the client will see a header
+            -- it wasn't expecting. Today the two merges that take this
+            -- path (profile + concat examples) don't declare flags, so
+            -- this is a known gap rather than a bug. When the first
+            -- flags-declaring synthesizing UDF ships, extend this to
+            -- either reconstruct flags from the entries' lines or
+            -- require the merge to return them alongside the bytes.
             return "VA " .. #winner_idx .. "\r\n" .. winner_idx .. "\r\n"
         end
 
