@@ -24,6 +24,14 @@ function M.reload()
     return M.load_config(M._config_path)
 end
 
+-- use_config installs an already-validated config table into module state
+-- without reading from disk. Lets mcp_config_routes pick up the exact
+-- snapshot mcp_config_pools loaded, so a concurrent edit to the config
+-- file between those phases cannot desync pools from routes.
+function M.use_config(cfg)
+    M._config = cfg
+end
+
 -- build_pools() is intended to be called from mcp_config_pools(). It returns
 -- a { pool_name = pool_obj } table that memcached passes to the per-worker
 -- mcp_config_routes hook, where it must be handed to build_routes().

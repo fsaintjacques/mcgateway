@@ -59,8 +59,10 @@ KIND_CLUSTER_NAME ?= mcgateway
 KIND_PROVIDER     ?= $(shell [ -n "$$GITHUB_ACTIONS" ] && echo docker || \
                        (command -v podman >/dev/null 2>&1 && echo podman || echo docker))
 MCGATEWAY_IMAGE   ?= $(shell [ "$(KIND_PROVIDER)" = "podman" ] && echo localhost/mcgateway:dev || echo mcgateway:dev)
-MCGATEWAY_IMAGE_REPO = $(firstword $(subst :, ,$(MCGATEWAY_IMAGE)))
-MCGATEWAY_IMAGE_TAG  = $(lastword  $(subst :, ,$(MCGATEWAY_IMAGE)))
+# Split on the *last* colon only so registries with a port survive:
+# `localhost:5001/mcgateway:dev` -> repo=localhost:5001/mcgateway, tag=dev.
+MCGATEWAY_IMAGE_REPO = $(shell printf '%s' '$(MCGATEWAY_IMAGE)' | sed -e 's/:[^:]*$$//')
+MCGATEWAY_IMAGE_TAG  = $(shell printf '%s' '$(MCGATEWAY_IMAGE)' | sed -e 's/^.*://')
 
 export KIND_EXPERIMENTAL_PROVIDER = $(KIND_PROVIDER)
 

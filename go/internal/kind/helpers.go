@@ -77,10 +77,28 @@ func PortForwardPod(t *testing.T, ctx context.Context, cs kubernetes.Interface, 
 		pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 		if err == nil {
 			for _, p := range pods.Items {
-				if p.Status.Phase == corev1.PodRunning {
-					podName = p.Name
-					break
+				// Skip pods that are terminating — a freshly-deleted pod
+				// may still report Running while kubelet tears it down,
+				// and port-forwarding to it would target the old config.
+				if p.DeletionTimestamp != nil {
+					continue
 				}
+				if p.Status.Phase != corev1.PodRunning {
+					continue
+				}
+				// Prefer a pod that's actually Ready.
+				ready := false
+				for _, c := range p.Status.Conditions {
+					if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+						ready = true
+						break
+					}
+				}
+				if !ready {
+					continue
+				}
+				podName = p.Name
+				break
 			}
 		}
 		if podName != "" {

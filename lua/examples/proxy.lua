@@ -6,17 +6,20 @@ package.cpath = LUA_ROOT .. "/?.so;" .. package.cpath
 
 local gw = require("mcgateway")
 
-gw.load_config(os.getenv("MCGATEWAY_CONFIG") or "/etc/mcgateway/config.lua")
+local CONFIG_PATH = os.getenv("MCGATEWAY_CONFIG") or "/etc/mcgateway/config.lua"
 
 -- mcp_config_pools runs in a one-off config Lua state; its return value is
--- handed to mcp_config_routes in each worker's Lua state.
+-- handed to mcp_config_routes in each worker's Lua state. Load the config
+-- once here and ship it alongside the pool table so workers attach routes
+-- against the exact same config snapshot that built the pools. Re-reading
+-- the file from each worker would race reloads and let routes reference
+-- pools that no longer exist (or miss pools that now do).
 function mcp_config_pools()
-    return gw.build_pools()
+    local cfg = gw.load_config(CONFIG_PATH)
+    return { pools = gw.build_pools(), config = cfg }
 end
 
-function mcp_config_routes(pools)
-    -- load_config again so the worker's own state has the keyspace table;
-    -- re-reading is cheap and keeps per-worker state self-contained.
-    gw.load_config(os.getenv("MCGATEWAY_CONFIG") or "/etc/mcgateway/config.lua")
-    gw.build_routes(pools)
+function mcp_config_routes(bundle)
+    gw.use_config(bundle.config)
+    gw.build_routes(bundle.pools)
 end
