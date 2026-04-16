@@ -10,8 +10,11 @@
 //!
 //! Per-call stores are the point: a trapping or misbehaving merge
 //! cannot corrupt state visible to subsequent calls. Wasmtime's
-//! pooling allocator makes the per-call cost a fixed-size bump, which
-//! merges — pure, short — amortize fine.
+//! pooling allocator (configured in [`WasmHost::new`]) makes the
+//! per-call cost a fixed-size bump, which merges — pure, short —
+//! amortize fine. The pool also serves as the memory cap: each slot
+//! is sized to [`MAX_GUEST_MEMORY_BYTES`], so a runaway merge cannot
+//! exhaust host memory regardless of the deadline.
 //!
 //! This crate owns only the host-side codec, lifecycle, deadlines,
 //! and log import. The guest-side ABI types (the `#[merge_fn]` proc
@@ -26,7 +29,8 @@ use std::time::Duration;
 
 use mcgateway_core::{Entry, Merge, MergeResult};
 use wasmtime::{
-    Caller, Config, Engine, Error, Instance, Linker, Memory, Module, Result, Store, TypedFunc,
+    Caller, Config, Engine, Error, Instance, InstancePre, Linker, Memory, Module, Result, Store,
+    TypedFunc,
 };
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
@@ -71,10 +75,13 @@ pub const DEFAULT_DEADLINE_MS: u64 = 50;
 
 /// Epoch tick interval. The ticker thread advances the engine's epoch
 /// this often; a deadline of N milliseconds maps to `ceil(N /
-/// TICK_INTERVAL_MS)` epoch ticks. 10 ms gives a ~5-tick budget for
-/// the default 50 ms deadline, which is coarse enough to not dominate
-/// the hot path and fine enough for the intended kill granularity.
-pub const TICK_INTERVAL_MS: u64 = 10;
+/// TICK_INTERVAL_MS)` epoch ticks. 2 ms gives a 25-tick budget for
+/// the default 50 ms deadline. Wasmtime's epoch check is a relaxed
+/// load on a function-prologue counter, so 500 wakeups/s is not
+/// measurable next to actual merge work; the payoff is ±2 ms kill
+/// accuracy instead of ±10 ms. Fuel-based bounded-CPU accounting
+/// lands with Stage 6.
+pub const TICK_INTERVAL_MS: u64 = 2;
 
 /// Maximum number of `mcgw_log` lines the host will emit per merge
 /// call. Exceeded lines are dropped silently so a runaway guest can't
@@ -86,6 +93,19 @@ pub const LOG_BUDGET_PER_CALL: u32 = 16;
 /// is untrusted; without this cap a malicious guest could force the
 /// host to allocate multiple gigabytes per call.
 pub const LOG_MAX_BYTES: u32 = 4096;
+
+/// How many merges can be in flight concurrently across the process.
+/// Sets the pooling allocator's slot count for core instances and
+/// memories. Excess concurrent calls fail `instantiate` and degrade
+/// to `MergeResult::Miss` via [`Merge::apply`]. Size it for peak
+/// merge fan-out, not total RPS.
+pub const MAX_CONCURRENT_MERGES: u32 = 256;
+
+/// Per-merge maximum linear memory. The pooling allocator
+/// pre-reserves this much address space per slot; a guest grow
+/// beyond this traps. Doubles as the `DoS` cap — the deadline alone
+/// won't stop a merge that simply asks for pages.
+pub const MAX_GUEST_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 
 macro_rules! werr {
     ($($arg:tt)*) => { Error::msg(format!($($arg)*)) };
@@ -162,11 +182,28 @@ fn spawn_ticker(engine: Engine) -> TickerHandle {
 
 impl WasmHost {
     /// Build a host with Cranelift codegen at Speed opt level, epoch
-    /// interruption armed, and a background ticker thread.
+    /// interruption armed, the pooling allocator configured, and a
+    /// background ticker thread.
     pub fn new() -> Result<Self> {
         let mut cfg = Config::new();
         cfg.cranelift_opt_level(wasmtime::OptLevel::Speed);
         cfg.epoch_interruption(true);
+
+        // Pooling allocator: pre-reserves a fixed slab of instance
+        // and memory slots so per-call `Store::new` + instantiate is
+        // a bump, not an `mmap`. Slot sizes also cap guest memory.
+        let mut pool = wasmtime::PoolingAllocationConfig::default();
+        pool.total_core_instances(MAX_CONCURRENT_MERGES);
+        pool.total_memories(MAX_CONCURRENT_MERGES);
+        pool.max_memory_size(MAX_GUEST_MEMORY_BYTES);
+        cfg.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pool));
+
+        // CoW memory init: instantiate reuses the module's data
+        // segments as a copy-on-write mapping instead of memcpy-ing
+        // them into the fresh memory. Default in recent wasmtime,
+        // set explicitly to document the dependency.
+        cfg.memory_init_cow(true);
+
         let engine = Engine::new(&cfg)?;
         let ticker = spawn_ticker(engine.clone());
         Ok(Self {
@@ -252,15 +289,14 @@ fn build_linker(engine: &Engine) -> Result<Linker<MergeStoreData>> {
 /// A compiled merge. Immutable after construction.
 pub struct WasmMerge {
     engine: Engine,
-    module: Module,
     module_name: Arc<str>,
     required_flags: String,
     deadline_ticks: u64,
-    // Built once at load time and reused across all calls. A Linker
-    // depends only on the Engine, so the same instance is safe to
-    // share across stores; per-call rebuild would re-register every
-    // WASI preview1 import on each merge.
-    linker: Linker<MergeStoreData>,
+    // Pre-linked instance: imports are resolved against the module
+    // once at load time, so per-call `pre.instantiate(&mut store)`
+    // skips the `Linker` lookup and argument-coercion work. Holds an
+    // internal `Arc<Module>`, so we don't carry `Module` separately.
+    pre: InstancePre<MergeStoreData>,
 }
 
 fn default_deadline_ticks() -> u64 {
@@ -272,7 +308,7 @@ impl WasmMerge {
     /// version handshake and capturing optional metadata exports.
     /// `name` is included in `mcgw.log` output and in deadline error
     /// messages.
-    pub fn from_module(host: &WasmHost, module: Module, name: &str) -> Result<Self> {
+    pub fn from_module(host: &WasmHost, module: &Module, name: &str) -> Result<Self> {
         let engine = host.engine().clone();
         let module_name: Arc<str> = Arc::from(name);
 
@@ -285,7 +321,11 @@ impl WasmMerge {
         store.set_epoch_deadline(u64::MAX / 2);
         store.epoch_deadline_trap();
         let linker = build_linker(&engine)?;
-        let instance = linker.instantiate(&mut store, &module)
+        let pre = linker
+            .instantiate_pre(module)
+            .map_err(|e| e.context("pre-link module"))?;
+        let instance = pre
+            .instantiate(&mut store)
             .map_err(|e| e.context("instantiate module"))?;
 
         let abi_version: TypedFunc<(), u32> = instance
@@ -315,11 +355,10 @@ impl WasmMerge {
 
         Ok(Self {
             engine,
-            module,
             module_name,
             required_flags,
             deadline_ticks: default_deadline_ticks(),
-            linker,
+            pre,
         })
     }
 
@@ -343,10 +382,9 @@ impl WasmMerge {
     /// deadline, and encoding failures are returned as `Err`; the
     /// [`Merge::apply`] impl maps them all to `MergeResult::Miss`.
     pub fn run(&self, entries: &[Entry<'_>]) -> Result<MergeResult> {
-        run_with_linker(
+        run_with_pre(
             &self.engine,
-            &self.module,
-            &self.linker,
+            &self.pre,
             self.module_name.clone(),
             self.deadline_ticks,
             entries,
@@ -392,13 +430,12 @@ impl Merge for WasmMerge {
     }
 }
 
-/// Execute one merge call against a pre-built linker. Factored out
-/// so [`WasmMerge::run`] and the test helpers can both drive the
+/// Execute one merge call against a pre-linked instance. Factored
+/// out so [`WasmMerge::run`] and the test helpers can both drive the
 /// full marshal → invoke → decode path.
-fn run_with_linker(
+fn run_with_pre(
     engine: &Engine,
-    module: &Module,
-    linker: &Linker<MergeStoreData>,
+    pre: &InstancePre<MergeStoreData>,
     name: Arc<str>,
     deadline_ticks: u64,
     entries: &[Entry<'_>],
@@ -407,7 +444,7 @@ fn run_with_linker(
     store.set_epoch_deadline(deadline_ticks);
     store.epoch_deadline_trap();
 
-    let instance = linker.instantiate(&mut store, module)?;
+    let instance = pre.instantiate(&mut store)?;
 
     let memory = instance
         .get_memory(&mut store, "memory")
@@ -434,21 +471,15 @@ fn run_with_linker(
     }
 }
 
-/// Test-only helper: builds a fresh linker and runs the merge with a
-/// generous 1000-tick deadline under a "<test>" module name. Used by
-/// the `.wat` fixtures that exercise `run` directly without going
-/// through [`WasmMerge::from_module`].
+/// Test-only helper: builds a fresh linker, pre-links the module,
+/// and runs the merge with a generous 1000-tick deadline under a
+/// "<test>" module name. Used by the `.wat` fixtures that exercise
+/// `run` directly without going through [`WasmMerge::from_module`].
 #[doc(hidden)]
 pub fn run_test(engine: &Engine, module: &Module, entries: &[Entry<'_>]) -> Result<MergeResult> {
     let linker = build_linker(engine)?;
-    run_with_linker(
-        engine,
-        module,
-        &linker,
-        Arc::from("<test>"),
-        1000,
-        entries,
-    )
+    let pre = linker.instantiate_pre(module)?;
+    run_with_pre(engine, &pre, Arc::from("<test>"), 1000, entries)
 }
 
 struct EncodedEntries {
@@ -467,13 +498,14 @@ impl EncodedEntries {
         let count = u32::try_from(entries.len())
             .map_err(|_| werr!("too many entries for u32 count"))?;
 
-        // Two-phase: guest-allocate each entry's variable-length
-        // fields, then the entry array referencing those pointers.
-        // N+1 allocs per merge; fine at merge-scale. Per-field
-        // buffers are not individually `mcgw_dealloc`'d — the
-        // per-call `Store` drops linear memory wholesale when `run`
-        // returns. Only the entry-array buffer itself is freed (to
-        // exercise the guest's free-list bookkeeping).
+        // Two-phase: one coalesced guest alloc per entry for its
+        // variable-length fields (see [`FieldPtrs::write`]), then
+        // the entry array referencing those pointers. N+1 guest
+        // allocs per merge. Per-entry buffers are not individually
+        // `mcgw_dealloc`'d — the per-call `Store` drops linear
+        // memory wholesale when `run` returns. Only the entry-array
+        // buffer itself is freed (to exercise the guest's free-list
+        // bookkeeping).
         let mut field_allocs: Vec<FieldPtrs> = Vec::with_capacity(entries.len());
         for e in entries {
             field_allocs.push(FieldPtrs::write(store, memory, alloc, e)?);
@@ -511,49 +543,80 @@ struct FieldPtrs {
 }
 
 impl FieldPtrs {
+    /// Allocate a single guest buffer for all of an entry's
+    /// variable-length fields (key, pool, optional value, optional
+    /// line) and write them contiguously. One `mcgw_alloc` host-call
+    /// crossing per entry instead of up to four; the wire format is
+    /// unchanged since each field's (ptr, len) is still recorded
+    /// independently. Absent (value|line) → `(0, 0)`; all other
+    /// fields get a non-null ptr within the allocation, which lets
+    /// the guest reconstruct zero-length slices safely.
     fn write(
         store: &mut Store<MergeStoreData>,
         memory: &Memory,
         alloc: &TypedFunc<(u32, u32), u32>,
         e: &Entry<'_>,
     ) -> Result<Self> {
+        let key_len = u32::try_from(e.key.len()).map_err(|_| werr!("key too large for u32"))?;
+        let pool_bytes = e.pool.as_bytes();
+        let pool_len =
+            u32::try_from(pool_bytes.len()).map_err(|_| werr!("pool too large for u32"))?;
+        let value_len = match e.value {
+            Some(b) => u32::try_from(b.len()).map_err(|_| werr!("value too large for u32"))?,
+            None => 0,
+        };
+        let line_len = match e.line {
+            Some(b) => u32::try_from(b.len()).map_err(|_| werr!("line too large for u32"))?,
+            None => 0,
+        };
+
+        // Sum in u64 to detect u32 overflow before asking the guest.
+        let total = u64::from(key_len)
+            + u64::from(pool_len)
+            + u64::from(value_len)
+            + u64::from(line_len);
+        let alloc_size = u32::try_from(total.max(1))
+            .map_err(|_| werr!("entry field total size overflow u32"))?;
+        let base = alloc.call(&mut *store, (alloc_size, 1))?;
+        if base == 0 {
+            return Err(werr!("guest mcgw_alloc returned null"));
+        }
+
+        let mut off: u32 = 0;
+
+        memory.write(&mut *store, (base + off) as usize, e.key)?;
+        let key = (base + off, key_len);
+        off += key_len;
+
+        memory.write(&mut *store, (base + off) as usize, pool_bytes)?;
+        let pool = (base + off, pool_len);
+        off += pool_len;
+
+        let value = match e.value {
+            Some(b) => {
+                memory.write(&mut *store, (base + off) as usize, b)?;
+                let p = (base + off, value_len);
+                off += value_len;
+                p
+            }
+            None => (0, 0),
+        };
+
+        let line = match e.line {
+            Some(b) => {
+                memory.write(&mut *store, (base + off) as usize, b)?;
+                (base + off, line_len)
+            }
+            None => (0, 0),
+        };
+
         Ok(Self {
-            key: write_bytes(store, memory, alloc, e.key)?,
-            pool: write_bytes(store, memory, alloc, e.pool.as_bytes())?,
-            value: match e.value {
-                Some(b) => write_bytes(store, memory, alloc, b)?,
-                None => (0, 0),
-            },
-            line: match e.line {
-                Some(b) => write_bytes(store, memory, alloc, b)?,
-                None => (0, 0),
-            },
+            key,
+            pool,
+            value,
+            line,
         })
     }
-}
-
-fn write_bytes(
-    store: &mut Store<MergeStoreData>,
-    memory: &Memory,
-    alloc: &TypedFunc<(u32, u32), u32>,
-    bytes: &[u8],
-) -> Result<(u32, u32)> {
-    if bytes.is_empty() {
-        let ptr = alloc.call(&mut *store, (1, 1))?;
-        if ptr == 0 {
-            return Err(werr!(
-                "guest mcgw_alloc returned null for empty-slice sentinel"
-            ));
-        }
-        return Ok((ptr, 0));
-    }
-    let len = u32::try_from(bytes.len()).map_err(|_| werr!("field too large for u32"))?;
-    let ptr = alloc.call(&mut *store, (len, 1))?;
-    if ptr == 0 {
-        return Err(werr!("guest mcgw_alloc returned null"));
-    }
-    memory.write(&mut *store, ptr as usize, bytes)?;
-    Ok((ptr, len))
 }
 
 fn encode_entry(entry: &Entry<'_>, fields: &FieldPtrs, out: &mut [u8; ENTRY_SIZE as usize]) {

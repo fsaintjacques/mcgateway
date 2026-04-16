@@ -67,7 +67,7 @@ fn proto_wasm() -> &'static [u8] {
 fn load_merge() -> (WasmHost, WasmMerge) {
     let host = WasmHost::new().unwrap();
     let module = host.compile(proto_wasm()).unwrap();
-    let merge = WasmMerge::from_module(&host, module, "merge-profile-proto").unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "merge-profile-proto").unwrap();
     (host, merge)
 }
 

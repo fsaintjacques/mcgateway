@@ -75,7 +75,7 @@ fn trap_fixture_run_returns_err_merge_returns_miss() {
     assert!(direct.is_err(), "run() must propagate traps");
 
     // The Merge impl swallows it and degrades to Miss.
-    let merge = WasmMerge::from_module(&host, module, "fixture").unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "fixture").unwrap();
     let result = merge.apply(&entries);
     assert!(matches!(result, MergeResult::Miss));
 }
@@ -84,7 +84,7 @@ fn trap_fixture_run_returns_err_merge_returns_miss() {
 fn bad_abi_is_rejected_at_load() {
     let host = WasmHost::new().unwrap();
     let module = host.compile(&load("bad_abi.wat")).unwrap();
-    let Err(err) = WasmMerge::from_module(&host, module, "fixture") else {
+    let Err(err) = WasmMerge::from_module(&host, &module, "fixture") else {
         panic!("expected ABI version mismatch error");
     };
     let msg = format!("{err:#}");
@@ -119,7 +119,7 @@ fn guest_error_fixture_run_returns_err_merge_returns_miss() {
         "expected error code 7, got: {err:#}"
     );
 
-    let merge = WasmMerge::from_module(&host, module, "fixture").unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "fixture").unwrap();
     assert!(matches!(merge.apply(&entries), MergeResult::Miss));
 }
 
@@ -135,7 +135,7 @@ fn winner_out_of_range_is_rejected() {
         "expected out-of-range error, got: {err:#}"
     );
 
-    let merge = WasmMerge::from_module(&host, module, "fixture").unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "fixture").unwrap();
     assert!(matches!(merge.apply(&entries), MergeResult::Miss));
 }
 
@@ -145,9 +145,10 @@ fn infinite_loop_hits_deadline_and_degrades_to_miss() {
 
     let host = WasmHost::new().unwrap();
     let module = host.compile(&load("infinite_loop.wat")).unwrap();
-    let mut merge = WasmMerge::from_module(&host, module, "infinite_loop").unwrap();
-    // 3 ticks * 10 ms/tick = ~30 ms budget. Default is 5 ticks;
-    // override to keep test fast.
+    let mut merge = WasmMerge::from_module(&host, &module, "infinite_loop").unwrap();
+    // 3 ticks * TICK_INTERVAL_MS budget. Default is
+    // ceil(50 / TICK_INTERVAL_MS) ticks; override to keep test
+    // fast regardless of tick tuning.
     merge.set_deadline_ticks(3);
 
     let owned = sample_entries();
@@ -173,7 +174,7 @@ fn log_fixture_runs_without_error() {
     // up, instantiation would fail with "unknown import".
     let host = WasmHost::new().unwrap();
     let module = host.compile(&load("log_then_miss.wat")).unwrap();
-    let merge = WasmMerge::from_module(&host, module, "log_then_miss").unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "log_then_miss").unwrap();
     let owned = sample_entries();
     let entries = views(&owned);
     assert!(matches!(merge.apply(&entries), MergeResult::Miss));
@@ -185,7 +186,7 @@ fn log_flood_is_dropped_without_failing_merge() {
     // the surplus without trapping; the merge still returns Miss.
     let host = WasmHost::new().unwrap();
     let module = host.compile(&load("log_flood.wat")).unwrap();
-    let merge = WasmMerge::from_module(&host, module, "log_flood").unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "log_flood").unwrap();
     let owned = sample_entries();
     let entries = views(&owned);
     assert!(matches!(merge.apply(&entries), MergeResult::Miss));

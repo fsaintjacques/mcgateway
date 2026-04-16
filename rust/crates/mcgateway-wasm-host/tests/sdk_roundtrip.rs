@@ -212,6 +212,6 @@ fn required_flags_is_wired_through() {
     let wasm = example_wasm();
     let host = WasmHost::new().unwrap();
     let module = host.compile(wasm).unwrap();
-    let merge = WasmMerge::from_module(&host, module, "merge-last-n-wins").unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "merge-last-n-wins").unwrap();
     assert_eq!(merge.required_flags(), "t");
 }
