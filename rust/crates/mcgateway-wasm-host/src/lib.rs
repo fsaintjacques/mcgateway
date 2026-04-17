@@ -661,6 +661,15 @@ fn decode_result(
             memory.read(&*store, desc_ptr as usize, &mut desc)?;
             let ptr = u32::from_le_bytes(desc[0..4].try_into().unwrap());
             let len = u32::from_le_bytes(desc[4..8].try_into().unwrap());
+            // Clamp before allocating: a buggy or malicious guest can stamp
+            // any u32 into the descriptor, so refuse lengths beyond the
+            // guest's own memory cap rather than attempting a multi-GiB
+            // host-side `Vec`. `mcgw.log` applies the analogous cap.
+            if len as usize > MAX_GUEST_MEMORY_BYTES {
+                return Err(werr!(
+                    "guest synthesized payload length {len} exceeds guest memory cap"
+                ));
+            }
             let mut buf = vec![0u8; len as usize];
             memory.read(&*store, ptr as usize, &mut buf)?;
             dealloc.call(&mut *store, (ptr, len.max(1), 1))?;
