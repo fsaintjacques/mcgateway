@@ -6,22 +6,13 @@ local util = require("mcgateway.util")
 
 local M = {
     _config = nil,
-    _config_path = nil,
 }
 
 function M.load_config(path)
-    M._config_path = path
     M._config = config.load(path)
     util.log("loaded config from %s: %d pools, %d keyspaces",
         path, #M._config.pools, #M._config.keyspaces)
     return M._config
-end
-
-function M.reload()
-    if not M._config_path then
-        error("mcgateway: reload called before load_config", 0)
-    end
-    return M.load_config(M._config_path)
 end
 
 -- use_config installs an already-validated config table into module state
