@@ -66,8 +66,11 @@ MCGATEWAY_IMAGE_TAG  = $(shell printf '%s' '$(MCGATEWAY_IMAGE)' | sed -e 's/^.*:
 
 export KIND_EXPERIMENTAL_PROVIDER = $(KIND_PROVIDER)
 
+# Extra flags injected by CI (buildx --load and gha layer-cache flags).
+DOCKER_BUILD_ARGS ?=
+
 docker-build:
-	$(KIND_PROVIDER) build -t $(MCGATEWAY_IMAGE) -f docker/Dockerfile .
+	$(KIND_PROVIDER) build $(DOCKER_BUILD_ARGS) -t $(MCGATEWAY_IMAGE) -f docker/Dockerfile .
 
 kind-up:
 	kind create cluster --name $(KIND_CLUSTER_NAME) --config k8s/kind/cluster.yaml
