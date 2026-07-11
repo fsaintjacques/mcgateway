@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  pull_request:
+    paths:
+      - 'rust/**'
+      - 'go/**'
+      - 'lua/**'
+      - 'docker/**'
+      - 'k8s/**'
+      - 'Makefile'
+      - '.github/workflows/ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - 'go/**'
+      - 'lua/**'
+      - 'docker/**'
+      - 'k8s/**'
+      - 'Makefile'
+      - '.github/workflows/ci.yml'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  KIND_CLUSTER_NAME: mcgateway
+  MCGATEWAY_IMAGE: mcgateway:dev
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          shared-key: ci
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go/go.sum
+      - name: Install Lua
+        # `make check` silently skips the Lua tests when `lua` is absent, so
+        # make sure the plain `lua` name resolves after the package install.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+          command -v lua >/dev/null || sudo ln -sf "$(command -v lua5.4)" /usr/local/bin/lua
+      - run: make check
+
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go/go.sum
+      - uses: docker/setup-buildx-action@v3
+        with:
+          # Alias `docker build` to buildx so the Makefile's docker-build
+          # target picks up the container builder (required for gha cache).
+          install: true
+      - name: Expose GitHub runtime for buildx gha cache
+        uses: crazy-max/ghaction-github-runtime@v3
+      - name: Install KIND
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Create cluster
+        run: make kind-up
+      - name: Build image, install chart, run kind tests
+        run: |
+          make test-kind \
+            DOCKER_BUILD_ARGS="--load --cache-from type=gha --cache-to type=gha,mode=max"
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo '::group::nodes'
+          kubectl get nodes -o wide
+          echo '::endgroup::'
+          echo '::group::all resources (all namespaces)'
+          kubectl get all -A
+          echo '::endgroup::'
+          echo '::group::events (all namespaces, sorted)'
+          kubectl get events -A --sort-by=.lastTimestamp
+          echo '::endgroup::'
+          for ns in mcgateway-system default; do
+            echo "::group::describe pods ($ns)"
+            kubectl -n "$ns" describe pods
+            echo '::endgroup::'
+            echo "::group::pod logs ($ns, all containers, current + previous)"
+            for pod in $(kubectl -n "$ns" get pods -o name 2>/dev/null); do
+              echo "--- $pod ---"
+              kubectl -n "$ns" logs "$pod" --all-containers --tail=500 2>&1
+              echo "--- $pod (previous) ---"
+              kubectl -n "$ns" logs "$pod" --all-containers --previous --tail=500 2>&1
+            done
+            echo '::endgroup::'
+          done
+      - name: Teardown
+        if: always()
+        run: make kind-down
