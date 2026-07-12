@@ -1,4 +1,4 @@
-.PHONY: build check test test-kind clean rust-build rust-check \
+.PHONY: build check test test-kind clean rust-build rust-check generate \
         docker-build kind-up kind-down kind-load \
         helm-install-kind helm-uninstall-kind
 
@@ -36,7 +36,23 @@ check: rust-check
 	else \
 	  echo "skip lua tests (lua not installed)"; \
 	fi
+	@$(MAKE) --no-print-directory generate && \
+	  test -z "$$(git status --porcelain -- go/api k8s/charts/mcgateway/crds)" || \
+	  { echo "error: generated files drifted; run 'make generate' and commit the result"; exit 1; }
 	cd go && go vet -tags kind ./...
+
+# Regenerates deepcopy methods and CRD manifests from kubebuilder
+# markers in go/api/v1alpha1/. `go run pkg@version` pins the tool for
+# every invoker (no PATH setup, no CI install step) and keeps the
+# drift check in `check` comparing stable output. The check uses
+# `git status --porcelain`, not `git diff`, so brand-new (untracked)
+# generated files fail it too.
+CONTROLLER_GEN_VERSION = v0.21.0
+CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+
+generate:
+	cd go && $(CONTROLLER_GEN) object paths=./api/v1alpha1/...
+	cd go && $(CONTROLLER_GEN) crd paths=./api/v1alpha1/... output:crd:dir=../k8s/charts/mcgateway/crds
 
 rust-check:
 	cd rust && cargo test && cargo clippy --all-targets -- -D warnings
