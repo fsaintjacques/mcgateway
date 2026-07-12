@@ -1,0 +1,148 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: keyspaces.mcgateway.dev
+spec:
+  group: mcgateway.dev
+  names:
+    kind: Keyspace
+    listKind: KeyspaceList
+    plural: keyspaces
+    singular: keyspace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.prefix
+      name: Prefix
+      type: string
+    - jsonPath: .spec.merge.name
+      name: Merge
+      type: string
+    - jsonPath: .spec.writePolicy
+      name: WritePolicy
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Keyspace binds a key prefix to backend pools with a merge strategy
+          and a write policy. The routing key is spec.prefix; metadata.name
+          is only the object's identity.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              KeyspaceSpec defines the routing, merge, and write behaviour for a
+              key prefix.
+            properties:
+              merge:
+                description: |-
+                  Merge selects the merge function for fan-out reads. Unset means
+                  the gateway default ("first-hit") — the default lives Lua-side
+                  next to the validator, so the renderer simply omits the key.
+                properties:
+                  name:
+                    description: Name of a built-in merge or of a WASM module.
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                    type: string
+                  wasm:
+                    description: |-
+                      Wasm optionally inlines the module implementing Name. Encoded
+                      as base64 in YAML/JSON; rendered by the operator to
+                      $MCGW_UDF_DIR/<Name>.wasm. The cap bounds the base64 form —
+                      roughly 768 KiB of raw module — keeping the object well under
+                      etcd's size limit; modules beyond it are the future
+                      MergeFunction CRD's cue.
+                    format: byte
+                    maxLength: 1048576
+                    type: string
+                required:
+                - name
+                type: object
+              prefix:
+                description: |-
+                  Prefix routes keys of the form "<prefix>:<rest>". Must be
+                  unique across Keyspaces in the namespace (renderer-enforced).
+                  The pattern is deliberately stricter than the Lua validator
+                  (which bans only ':' and the exact reserved names): no leading
+                  underscore reserves the whole "__" control namespace, and a
+                  bounded charset keeps prefixes log- and metric-label-safe.
+                maxLength: 128
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                type: string
+              read:
+                description: |-
+                  Read lists pools fanned out to on reads, in preference order
+                  (pool-preferred consumes this order). listType=atomic rather
+                  than set: order is load-bearing and server-side-apply merge
+                  semantics on sets do not preserve it.
+                items:
+                  maxLength: 253
+                  minLength: 1
+                  type: string
+                maxItems: 16
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: read pools must be unique
+                  rule: self.all(x, self.filter(y, y == x).size() == 1)
+              write:
+                description: |-
+                  Write lists pools writes fan out to. Required: the Lua schema
+                  has no read-only keyspace.
+                items:
+                  maxLength: 253
+                  minLength: 1
+                  type: string
+                maxItems: 16
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: write pools must be unique
+                  rule: self.all(x, self.filter(y, y == x).size() == 1)
+              writePolicy:
+                default: all
+                description: |-
+                  WritePolicy: "all" succeeds iff every write pool acks; "first"
+                  succeeds on the first pool in Write order.
+                enum:
+                - all
+                - first
+                type: string
+            required:
+            - prefix
+            - read
+            - write
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}
