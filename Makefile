@@ -31,7 +31,8 @@ MCMC_CODE_STORED=8,MCMC_CODE_DELETED=10,MCMC_CODE_OK=15}
 check: rust-check
 	@if command -v lua >/dev/null 2>&1; then \
 	  lua -e "$(LUA_CHECK_PRELUDE); require('mcgateway')" && \
-	  cd lua && lua tests/test_entries.lua && lua tests/test_routes.lua; \
+	  cd lua && lua tests/test_entries.lua && lua tests/test_routes.lua && \
+	  lua tests/test_config_fallback.lua; \
 	else \
 	  echo "skip lua tests (lua not installed)"; \
 	fi

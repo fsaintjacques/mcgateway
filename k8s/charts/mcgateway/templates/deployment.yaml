@@ -19,6 +19,28 @@ spec:
         # Force pod restart when config changes.
         checksum/config: {{ .Values.config | sha256sum }}
     spec:
+      {{- if .Values.gateway.liveReload }}
+      # Seed the writable state dir from the ConfigMap and the image's
+      # baked-in UDF modules. The gateway then reads (and libmcgateway
+      # watches) the seeded copies, so runtime writes to the state dir
+      # reload the proxy live — no pod restart.
+      initContainers:
+        - name: config-seed
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /var/run/mcgateway/udf
+              cp /config-src/config.lua /var/run/mcgateway/config.lua
+              cp /etc/mcgateway/udf/*.wasm /var/run/mcgateway/udf/ 2>/dev/null || true
+          volumeMounts:
+            - name: config
+              mountPath: /config-src
+            - name: state
+              mountPath: /var/run/mcgateway
+      {{- end }}
       containers:
         - name: gateway
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -38,14 +60,29 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
+          {{- if .Values.gateway.liveReload }}
+          env:
+            - name: MCGATEWAY_CONFIG
+              value: /var/run/mcgateway/config.lua
+            - name: MCGW_UDF_DIR
+              value: /var/run/mcgateway/udf
+          volumeMounts:
+            - name: state
+              mountPath: /var/run/mcgateway
+          {{- else }}
           volumeMounts:
             - name: config
               mountPath: /etc/mcgateway/config.lua
               subPath: config.lua
+          {{- end }}
       volumes:
         - name: config
           configMap:
             name: mcgateway-config
+        {{- if .Values.gateway.liveReload }}
+        - name: state
+          emptyDir: {}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
