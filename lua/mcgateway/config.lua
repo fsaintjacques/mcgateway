@@ -94,9 +94,22 @@ local function validate_keyspace(ks, seen_prefix, pool_names)
     if ks.merge == nil then
         ks.merge = DEFAULT_MERGE
     end
-    if type(ks.merge) ~= "string" or not mcgw_native.has_merge(ks.merge) then
+    if type(ks.merge) ~= "string" then
         err("keyspace %q: unknown merge %q", ks.prefix, tostring(ks.merge))
     end
+    -- Resolve the merge's meta flags now, while the module provably
+    -- exists, and store them on the validated entry. Route build must
+    -- read this field instead of querying the registry: the validated
+    -- config doubles as the reload fallback snapshot, and re-applying
+    -- it must stay safe even if the module has since left the UDF
+    -- directory (registry lookups happen only here, inside the load's
+    -- pcall). One pcall'd lookup rather than has_merge + a second
+    -- call, so a concurrent registry swap can't slip between them.
+    local ok, flags = pcall(mcgw_native.required_flags, ks.merge)
+    if not ok then
+        err("keyspace %q: unknown merge %q", ks.prefix, ks.merge)
+    end
+    ks.required_flags = flags
 end
 
 function M.validate(cfg)

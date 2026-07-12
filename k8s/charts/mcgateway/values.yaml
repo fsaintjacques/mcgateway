@@ -6,6 +6,13 @@ image:
 gateway:
   replicas: 1
   port: 11211
+  # Live config reload: an init container seeds the ConfigMap config
+  # and the image's baked-in UDF modules into a writable emptyDir; the
+  # gateway reads the copies and libmcgateway SIGHUPs the proxy when
+  # they change. Writes into the state dir take effect without a pod
+  # restart (the ConfigMap remains the seed at pod start). Exercised
+  # by the kind suite; Stage 4's operator mode supersedes this.
+  liveReload: false
   resources:
     requests:
       cpu: 100m

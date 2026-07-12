@@ -6,13 +6,35 @@ local util = require("mcgateway.util")
 
 local M = {
     _config = nil,
+    _last_good = nil,
 }
 
+-- load_config reads and validates the config file. A failure on the
+-- *first* load is fatal: a gateway must not start without a config.
+-- A failure on a later load (SIGHUP reload) falls back to the last
+-- good config instead of erroring, because memcached treats an error
+-- in mcp_config_pools during reload as fatal and exits — a truncated
+-- or half-written config file must degrade to "keep serving the old
+-- routes", never to an outage. Module state survives reloads (the
+-- proxy re-runs mcp_config_pools in the same config VM, where
+-- package.loaded caches this table), which is what makes the
+-- fallback possible.
 function M.load_config(path)
-    M._config = config.load(path)
+    local ok, cfg = pcall(config.load, path)
+    if not ok then
+        if M._last_good == nil then
+            error(cfg, 0)
+        end
+        util.log("config reload from %s failed, keeping previous config: %s",
+            path, tostring(cfg))
+        M._config = M._last_good
+        return M._config
+    end
+    M._last_good = cfg
+    M._config = cfg
     util.log("loaded config from %s: %d pools, %d keyspaces",
-        path, #M._config.pools, #M._config.keyspaces)
-    return M._config
+        path, #cfg.pools, #cfg.keyspaces)
+    return cfg
 end
 
 -- use_config installs an already-validated config table into module state

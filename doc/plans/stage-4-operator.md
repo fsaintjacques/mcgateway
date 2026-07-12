@@ -251,15 +251,20 @@ registry swap — that closes the wasm-registration/config-reload race
 that `has_merge` validation opens; see *Merge-name resolution* under
 CRDs for the full argument.
 
-One behaviour to verify early, because the design leans on it: **a
-config file that fails to load on reload must leave the old routes
-serving.** The Lua validator throwing inside `mcp_config_pools` on
-SIGHUP should abort the reload, not the process. The renderer's own
-validation makes a bad file unreachable in practice, but the failure
-mode must still be "log + keep serving." If it turns out memcached
-dies, the watcher grows a pre-flight `luaL_loadfile`+validate step
-before raising the signal. This is exit-criterion material, not an
-implementation detail.
+One behaviour had to be verified early, because the design leans on
+it: **a config file that fails to load on reload must leave the old
+routes serving.** Step 1's spike settled it, negatively: memcached
+treats an error thrown inside `mcp_config_pools` during a SIGHUP
+reload as fatal and exits — and because the bad file persists in the
+state volume across container restarts, the pod crash-loops. The fix
+landed Lua-side rather than as the rust pre-flight originally
+sketched: `gw.load_config` pcalls the load and, on a reload failure,
+logs and returns the last good config (module state survives reloads
+— the proxy re-runs `mcp_config_pools` in the same config VM). First
+load stays strict: a gateway must not start blind. This is cheaper
+than pre-flight validation in the watcher, keeps the fallback next to
+the code that owns config loading, and degrades a half-written file
+to one redundant-but-idempotent route rebuild.
 
 ---
 
@@ -781,8 +786,10 @@ debounce, `raise(SIGHUP)`, re-raise on UDF registry swap), wired in
 items pinned here, before any operator code exists:
 
 - A failing config on SIGHUP reload keeps old routes serving and does
-  not kill the process. If false, add the pre-flight validate before
-  raise — in this step, not later.
+  not kill the process. **Verified false**: memcached exits on a
+  config error during reload. Fixed in this step with the last-good
+  fallback in `gw.load_config` (see §Config reload) rather than the
+  rust pre-flight originally sketched.
 - Rename-based file replacement (the committer's commit primitive)
   reliably triggers the directory watcher on emptyDir.
 - A kind test proving live reload with no operator: `kubectl cp` a

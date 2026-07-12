@@ -3,6 +3,9 @@ image:
   tag: dev
   pullPolicy: Never
 
+gateway:
+  liveReload: true
+
 backends:
   enabled: true
   image:
