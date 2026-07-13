@@ -1,0 +1,46 @@
+{{- if .Values.operator.enabled }}
+# Pool and Keyspace CRs seeded from structured values, so a Helm
+# install declares a working config without touching kubectl. These
+# are ordinary CRs afterwards — edit, add, or delete them at runtime
+# and the operator reconciles. Inline wasm cannot ride through values
+# (module bytes are build artifacts); keyspaces needing custom merges
+# get their CRs applied out-of-band (the kind suite does exactly
+# this).
+{{- range .Values.pools }}
+---
+apiVersion: mcgateway.dev/v1alpha1
+kind: Pool
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "mcgateway.labels" $ | nindent 4 }}
+spec:
+  addrs: {{ toJson .addrs }}
+  {{- with .hash }}
+  hash: {{ . }}
+  {{- end }}
+  {{- with .dist }}
+  dist: {{ . }}
+  {{- end }}
+{{- end }}
+{{- range .Values.keyspaces }}
+---
+apiVersion: mcgateway.dev/v1alpha1
+kind: Keyspace
+metadata:
+  name: {{ .name | default .prefix }}
+  labels:
+    {{- include "mcgateway.labels" $ | nindent 4 }}
+spec:
+  prefix: {{ .prefix }}
+  read: {{ toJson .read }}
+  write: {{ toJson .write }}
+  {{- with .writePolicy }}
+  writePolicy: {{ . }}
+  {{- end }}
+  {{- with .merge }}
+  merge:
+    name: {{ . }}
+  {{- end }}
+{{- end }}
+{{- end }}

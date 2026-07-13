@@ -3,8 +3,12 @@ image:
   tag: dev
   pullPolicy: Never
 
-gateway:
-  liveReload: true
+operator:
+  enabled: true
+  image:
+    repository: localhost/mcgateway-operator
+    tag: dev
+    pullPolicy: Never
 
 backends:
   enabled: true
@@ -12,3 +16,47 @@ backends:
     repository: memcached
     tag: "1.6.32-alpine"
     pullPolicy: IfNotPresent
+
+# The same pools and keyspaces the static config carried, delivered
+# as CRs so the Stage 1-3 kind tests run against operator-rendered
+# config. The `profile` keyspace is absent: its merge module is a
+# build artifact, so the wasm kind test applies that CR itself with
+# the module inlined (extracted from the gateway image).
+pools:
+  - name: mc-a
+    addrs: ["mc-a:11211"]
+  - name: mc-b
+    addrs: ["mc-b:11211"]
+
+keyspaces:
+  # Stage 1 passthrough.
+  - prefix: user
+    read: [mc-a]
+    write: [mc-a]
+  - prefix: session
+    read: [mc-b]
+    write: [mc-b]
+  # Stage 2 fan-out reads with each built-in merge.
+  - prefix: fanfh
+    read: [mc-a, mc-b]
+    write: [mc-a, mc-b]
+    merge: first-hit
+  - prefix: fanpp
+    read: [mc-a, mc-b]
+    write: [mc-a, mc-b]
+    merge: pool-preferred
+  - prefix: fanlww
+    read: [mc-a, mc-b]
+    write: [mc-a, mc-b]
+    merge: last-write-wins
+  # Write-policy exercisers.
+  - prefix: wall
+    read: [mc-a, mc-b]
+    write: [mc-a, mc-b]
+    writePolicy: all
+    merge: first-hit
+  - prefix: wfirst
+    read: [mc-a, mc-b]
+    write: [mc-a, mc-b]
+    writePolicy: first
+    merge: first-hit

@@ -13,9 +13,12 @@ import (
 )
 
 // These tests exercise the Stage 4 step-1 deliverable: libmcgateway's
-// config watcher SIGHUPs the proxy when the seeded config (or UDF dir)
-// changes, and memcached rebuilds routes without a pod restart. They
-// require the chart's gateway.liveReload mode (on in values-kind.yaml).
+// config watcher SIGHUPs the proxy when the state-dir config (or UDF
+// dir) changes, and memcached rebuilds routes without a pod restart.
+// They run against any writable-state-dir mode — gateway.liveReload
+// or operator mode (the kind suite uses the latter) — and write files
+// directly, deliberately bypassing the operator: this is fault
+// injection against the watcher machinery itself.
 
 const (
 	statePath  = "/var/run/mcgateway/config.lua"
@@ -269,10 +272,12 @@ func TestLiveReload_WasmRemovalKeepsServing(t *testing.T) {
 		waitPrefixRejected(t, s.gwAddr, "wrm")
 	})
 
-	// Land a module, route a keyspace through it, prove it serves.
+	// Land a module (cloned from the image's baked path; the
+	// operator-owned state udf dir starts empty), route a keyspace
+	// through it, prove it serves.
 	_, errOut, err := mckind.ExecInPod(ctx, s.cs, s.cfg, s.ns, pod, "gateway",
 		[]string{"sh", "-ec", fmt.Sprintf(
-			"cp %[1]s/merge_last_n_wins.wasm %[1]s/.removal_probe.tmp && mv %[1]s/.removal_probe.tmp %[1]s/removal_probe.wasm",
+			"cp /etc/mcgateway/udf/merge_last_n_wins.wasm %[1]s/.removal_probe.tmp && mv %[1]s/.removal_probe.tmp %[1]s/removal_probe.wasm",
 			stateUdf)}, nil)
 	if err != nil {
 		t.Fatalf("land module: %v (stderr: %s)", err, errOut)
@@ -367,12 +372,13 @@ func TestLiveReload_WasmArrivalRevalidatesConfig(t *testing.T) {
 		t.Fatalf("rrl routed before module landed: %q", resp.Line)
 	}
 
-	// Land the module (clone a baked-in one under the probe name). The
+	// Land the module (clone one baked into the image under the probe
+	// name — the operator-owned state udf dir starts empty). The
 	// registry swap must re-raise SIGHUP; the pending config becomes
 	// valid and routes — with no further config write.
 	_, errOut, err := mckind.ExecInPod(ctx, s.cs, s.cfg, s.ns, pod, "gateway",
 		[]string{"sh", "-ec", fmt.Sprintf(
-			"cp %[1]s/merge_last_n_wins.wasm %[1]s/.reraise_probe.tmp && mv %[1]s/.reraise_probe.tmp %[1]s/reraise_probe.wasm",
+			"cp /etc/mcgateway/udf/merge_last_n_wins.wasm %[1]s/.reraise_probe.tmp && mv %[1]s/.reraise_probe.tmp %[1]s/reraise_probe.wasm",
 			stateUdf)}, nil)
 	if err != nil {
 		t.Fatalf("land module: %v (stderr: %s)", err, errOut)

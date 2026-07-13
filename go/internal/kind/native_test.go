@@ -12,10 +12,6 @@ import (
 // TestNativeMergeDispatch proves libmcgateway_native.so loaded and is
 // serving merge dispatch. A failure here almost always means the cdylib
 // didn't make it into the image or couldn't be dlopened by the proxy.
-//
-// Also asserts the example WASM UDF baked into /etc/mcgateway/udf by
-// the Dockerfile is registered — proves the Stage 3b UdfLoader walked
-// the directory at startup and wasmtime accepted the module.
 func TestNativeMergeDispatch(t *testing.T) {
 	s := newSuite(t)
 
@@ -24,20 +20,17 @@ func TestNativeMergeDispatch(t *testing.T) {
 		t.Fatalf("mg __mcgw:names v: %v", err)
 	}
 
-	got := strings.Split(resp, ",")
-	want := map[string]bool{
-		"first-hit":           true,
-		"last-write-wins":     true,
-		"pool-preferred":      true,
-		"merge_last_n_wins":   true,
-		"merge_profile_proto": true,
+	// The three built-ins must always be present. WASM modules are
+	// deliberately not asserted: in operator mode the UDF dir starts
+	// empty and modules arrive via inline-wasm CRs, so which ones are
+	// registered depends on which tests have run.
+	got := map[string]bool{}
+	for _, n := range strings.Split(resp, ",") {
+		got[n] = true
 	}
-	if len(got) != len(want) {
-		t.Fatalf("merge names: got %v, want all of %v", got, want)
-	}
-	for _, n := range got {
-		if !want[n] {
-			t.Fatalf("unexpected merge name %q in %v", n, got)
+	for _, n := range []string{"first-hit", "last-write-wins", "pool-preferred"} {
+		if !got[n] {
+			t.Fatalf("merge names: built-in %q missing from %v", n, got)
 		}
 	}
 }

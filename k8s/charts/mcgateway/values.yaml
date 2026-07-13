@@ -3,6 +3,28 @@ image:
   tag: dev
   pullPolicy: IfNotPresent
 
+# Operator mode: a native-sidecar operator in each gateway pod
+# compiles Pool/Keyspace CRs into the config the gateway consumes
+# (see doc/plans/stage-4-operator.md). Supersedes both the static
+# ConfigMap and gateway.liveReload. Seed CRs via `pools:` and
+# `keyspaces:` below.
+operator:
+  enabled: false
+  image:
+    repository: mcgateway-operator
+    tag: dev
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+# Structured seed CRs, rendered only when operator.enabled. Shapes
+# mirror the CRD specs; `merge` is a name only — inline wasm cannot
+# ride through values.
+pools: []
+keyspaces: []
+
 gateway:
   replicas: 1
   port: 11211
@@ -10,8 +32,9 @@ gateway:
   # and the image's baked-in UDF modules into a writable emptyDir; the
   # gateway reads the copies and libmcgateway SIGHUPs the proxy when
   # they change. Writes into the state dir take effect without a pod
-  # restart (the ConfigMap remains the seed at pod start). Exercised
-  # by the kind suite; Stage 4's operator mode supersedes this.
+  # restart (the ConfigMap remains the seed at pod start). Superseded
+  # by operator mode (which the kind suite runs); kept for
+  # operator-less deployments that want live reload.
   liveReload: false
   resources:
     requests:
