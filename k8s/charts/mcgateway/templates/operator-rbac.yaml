@@ -1,0 +1,38 @@
+{{- if .Values.operator.enabled }}
+# Read-only by design: the operator compiles CRs to files on a shared
+# volume and mutates no cluster state at all. Status subresource (and
+# with it write RBAC) lands in Stage 5 alongside the single-operator
+# topology.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcgateway-operator
+  labels:
+    {{- include "mcgateway.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcgateway-operator
+  labels:
+    {{- include "mcgateway.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["mcgateway.dev"]
+    resources: ["pools", "keyspaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcgateway-operator
+  labels:
+    {{- include "mcgateway.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcgateway-operator
+subjects:
+  - kind: ServiceAccount
+    name: mcgateway-operator
+    namespace: {{ .Release.Namespace }}
+{{- end }}

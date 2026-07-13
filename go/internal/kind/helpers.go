@@ -4,6 +4,7 @@ package kind
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -17,11 +18,17 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/portforward"
+	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/transport/spdy"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	v1alpha1 "github.com/fsaintjacques/mcgateway/go/api/v1alpha1"
 )
 
 // ReleaseNamespace is where the Helm chart installs the gateway + backends.
@@ -66,12 +73,10 @@ func WaitForDeploymentReady(t *testing.T, ctx context.Context, cs kubernetes.Int
 	t.Fatalf("deployment %s not ready within %v", name, timeout)
 }
 
-// PortForwardPod finds a running pod matching selector and forwards remotePort
-// to a local port. Returns the local port. The forward is torn down on test cleanup.
-func PortForwardPod(t *testing.T, ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, ns, labelSelector string, remotePort int) int {
+// RunningPodName returns the name of a Running, Ready, non-terminating pod
+// matching the selector, waiting up to 2 minutes for one to appear.
+func RunningPodName(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns, labelSelector string) string {
 	t.Helper()
-
-	var podName string
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
 		pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
@@ -79,36 +84,109 @@ func PortForwardPod(t *testing.T, ctx context.Context, cs kubernetes.Interface, 
 			for _, p := range pods.Items {
 				// Skip pods that are terminating — a freshly-deleted pod
 				// may still report Running while kubelet tears it down,
-				// and port-forwarding to it would target the old config.
+				// and targeting it would hit the old config.
 				if p.DeletionTimestamp != nil {
 					continue
 				}
 				if p.Status.Phase != corev1.PodRunning {
 					continue
 				}
-				// Prefer a pod that's actually Ready.
-				ready := false
+				// Only accept a pod that's actually Ready.
 				for _, c := range p.Status.Conditions {
 					if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
-						ready = true
-						break
+						return p.Name
 					}
 				}
-				if !ready {
-					continue
-				}
-				podName = p.Name
-				break
 			}
-		}
-		if podName != "" {
-			break
 		}
 		time.Sleep(2 * time.Second)
 	}
-	if podName == "" {
-		t.Fatalf("no running pod found for selector %q in ns %s", labelSelector, ns)
+	t.Fatalf("no running pod found for selector %q in ns %s", labelSelector, ns)
+	return ""
+}
+
+// ExecInPod runs a command in a pod's container, optionally feeding stdin,
+// and returns stdout and stderr. Container may be empty for the default.
+func ExecInPod(ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, ns, pod, container string, cmd []string, stdin []byte) (string, string, error) {
+	req := cs.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Namespace(ns).
+		Name(pod).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: container,
+			Command:   cmd,
+			Stdin:     len(stdin) > 0,
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(cfg, http.MethodPost, req.URL())
+	if err != nil {
+		return "", "", fmt.Errorf("create executor: %w", err)
 	}
+	var stdout, stderr bytes.Buffer
+	var stdinR io.Reader
+	if len(stdin) > 0 {
+		stdinR = bytes.NewReader(stdin)
+	}
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  stdinR,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	return stdout.String(), stderr.String(), err
+}
+
+// CRClient returns a controller-runtime client that speaks the
+// mcgateway CRD types, for tests that drive the operator via CRs.
+func CRClient(t *testing.T, cfg *rest.Config) crclient.Client {
+	t.Helper()
+	sch := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(sch); err != nil {
+		t.Fatalf("build scheme: %v", err)
+	}
+	cl, err := crclient.New(cfg, crclient.Options{Scheme: sch})
+	if err != nil {
+		t.Fatalf("create CR client: %v", err)
+	}
+	return cl
+}
+
+// PodLogs returns the tail of a container's log.
+func PodLogs(ctx context.Context, cs kubernetes.Interface, ns, pod, container string, tailLines int64) (string, error) {
+	req := cs.CoreV1().Pods(ns).GetLogs(pod, &corev1.PodLogOptions{
+		Container: container,
+		TailLines: &tailLines,
+	})
+	raw, err := req.DoRaw(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// PodRestartCount sums restartCount across all of the pod's containers.
+// The live-reload tests assert this stays flat: a reload that bounced the
+// container is a restart, not a reload.
+func PodRestartCount(ctx context.Context, cs kubernetes.Interface, ns, pod string) (int32, error) {
+	p, err := cs.CoreV1().Pods(ns).Get(ctx, pod, metav1.GetOptions{})
+	if err != nil {
+		return 0, err
+	}
+	var n int32
+	for _, c := range p.Status.ContainerStatuses {
+		n += c.RestartCount
+	}
+	return n, nil
+}
+
+// PortForwardPod finds a running pod matching selector and forwards remotePort
+// to a local port. Returns the local port. The forward is torn down on test cleanup.
+func PortForwardPod(t *testing.T, ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, ns, labelSelector string, remotePort int) int {
+	t.Helper()
+
+	podName := RunningPodName(t, ctx, cs, ns, labelSelector)
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

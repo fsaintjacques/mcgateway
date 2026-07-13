@@ -1,0 +1,21 @@
+pools:
+  - metadata: {name: mc-a}
+    spec:
+      addrs: ["mc-a:11211"]
+keyspaces:
+  - metadata: {name: alpha}
+    spec:
+      prefix: alpha
+      read: [mc-a]
+      write: [mc-a]
+      merge:
+        name: shared_merge
+        wasm: ZmFrZS13YXNtLW1vZHVsZS1vbmU=
+  - metadata: {name: beta}
+    spec:
+      prefix: beta
+      read: [mc-a]
+      write: [mc-a]
+      merge:
+        name: shared_merge
+        wasm: ZmFrZS13YXNtLW1vZHVsZS1vbmU=

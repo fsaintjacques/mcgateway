@@ -1,0 +1,2 @@
+Pool "twin": skipped: 2 Pool objects share this name
+Keyspace "twin-ks": skipped: 2 Keyspace objects share this name

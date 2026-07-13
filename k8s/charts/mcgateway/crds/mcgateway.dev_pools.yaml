@@ -1,0 +1,95 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: pools.mcgateway.dev
+spec:
+  group: mcgateway.dev
+  names:
+    kind: Pool
+    listKind: PoolList
+    plural: pools
+    singular: pool
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.addrs
+      name: Addrs
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Pool defines a named backend: a set of addresses plus the
+          client-side hashing used to spread keys across them. The pool's
+          name is metadata.name — a Pool is a reference to backends that
+          already exist; the operator never provisions or scales them.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PoolSpec defines the backend addresses and key-distribution
+              behaviour of a pool.
+            properties:
+              addrs:
+                description: |-
+                  Addrs lists backend addresses as "host:port". Order is
+                  significant for distribution stability; a duplicated address
+                  would silently skew key distribution, hence the uniqueness
+                  rule. Item length is bounded to a DNS-1123 name plus port.
+                items:
+                  maxLength: 259
+                  minLength: 1
+                  type: string
+                maxItems: 64
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: addrs must be unique
+                  rule: self.all(x, self.filter(y, y == x).size() == 1)
+              dist:
+                description: Dist selects the key-distribution strategy across Addrs.
+                enum:
+                - ring_hash
+                - jump_hash
+                type: string
+              hash:
+                description: |-
+                  Hash selects the key-hashing function. The gateway default
+                  applies when unset.
+                enum:
+                - xxhash
+                - md5
+                - crc32
+                type: string
+            required:
+            - addrs
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

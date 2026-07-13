@@ -15,6 +15,8 @@ mcgateway-core = { path = "../mcgateway-core" }
 mcgateway-wasm-host = { path = "../mcgateway-wasm-host" }
 mlua = { version = "0.10", features = ["lua54", "module"] }
 arc-swap = "1"
+libc = "0.2"
+notify = "8"
 
 [dev-dependencies]
 tempfile = "3"

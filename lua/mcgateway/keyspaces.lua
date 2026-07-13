@@ -1,5 +1,3 @@
-local mcgw_native = require("mcgateway_native")
-
 local M = {}
 
 -- Build keyspace lookup table from validated config + a map of pool_name ->
@@ -24,7 +22,13 @@ function M.build(keyspaces_cfg, pools_by_name)
             write_pools = write_pools,
             write_policy = ks.write_policy,
             merge_name = ks.merge,
-            merge_flags = mcgw_native.required_flags(ks.merge),
+            -- Resolved at validation time and carried on the config
+            -- snapshot. Never query the registry here: this runs in
+            -- every worker VM on reload, including reloads that fell
+            -- back to the last good config after its module vanished
+            -- from the UDF directory — a registry miss here would be
+            -- an error inside the reload lifecycle, which is fatal.
+            merge_flags = ks.required_flags,
         }
     end
     return out

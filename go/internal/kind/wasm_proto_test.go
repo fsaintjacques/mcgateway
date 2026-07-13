@@ -3,32 +3,97 @@
 package kind_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"sort"
 	"testing"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	v1alpha1 "github.com/fsaintjacques/mcgateway/go/api/v1alpha1"
 	mckind "github.com/fsaintjacques/mcgateway/go/internal/kind"
 )
 
+// ensureProfileKeyspace applies the `profile` Keyspace CR with the
+// prost-based merge module inlined. The module is a build artifact
+// the values file cannot carry (it lives baked in the gateway image),
+// so the suite creates this CR itself — idempotently, and it stays
+// applied: it is part of the release's expected state, like the
+// values-seeded CRs.
+func ensureProfileKeyspace(t *testing.T, ctx context.Context, s *suite) {
+	t.Helper()
+	cl := mckind.CRClient(t, s.cfg)
+	pod := mckind.RunningPodName(t, ctx, s.cs, s.ns, gatewaySelector)
+	ks := &v1alpha1.Keyspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "profile", Namespace: s.ns},
+		Spec: v1alpha1.KeyspaceSpec{
+			Prefix: "profile",
+			Read:   []string{"mc-a", "mc-b"},
+			Write:  []string{"mc-a", "mc-b"},
+			Merge: &v1alpha1.MergeSpec{
+				Name: "merge_profile_proto",
+				Wasm: bakedModule(t, ctx, s, pod, "merge_profile_proto"),
+			},
+		},
+	}
+	if err := cl.Create(ctx, ks); apierrors.IsAlreadyExists(err) {
+		// The CR persists across suite runs (created out-of-band, so
+		// helm never touches it). Reconcile its spec with the bytes
+		// just extracted from the *current* image — otherwise a
+		// rebuilt module would silently keep validating the old one.
+		var cur v1alpha1.Keyspace
+		if err := cl.Get(ctx, crclient.ObjectKeyFromObject(ks), &cur); err != nil {
+			t.Fatalf("get existing profile keyspace: %v", err)
+		}
+		if cur.Spec.Merge == nil || !bytes.Equal(cur.Spec.Merge.Wasm, ks.Spec.Merge.Wasm) {
+			cur.Spec = ks.Spec
+			if err := cl.Update(ctx, &cur); err != nil {
+				t.Fatalf("update profile keyspace with current module: %v", err)
+			}
+		}
+	} else if err != nil {
+		t.Fatalf("create profile keyspace: %v", err)
+	}
+	waitMergeRegistered(t, s, "merge_profile_proto", true)
+	// waitPrefixRouted can't be used here: a plain ms/mg round trip
+	// writes non-protobuf bytes, which this merge (correctly) treats
+	// as undecodable, yielding a miss. Accepting the write is enough
+	// to prove the prefix routes.
+	deadline := time.Now().Add(reloadWait)
+	for {
+		if resp, err := mckind.McSet(s.gwAddr, uniqueKey("profile", "probe"), "x"); err == nil && resp.Status == "HD" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("profile keyspace never routed")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 // TestWasmProtoMerge is the end-to-end production-shaped loop for the
-// Stage 3b WASM UDF path: seed two backends with distinct
-// `Profile` protobufs, read through the gateway (which fans out, runs
-// the prost-based `merge_profile_proto.wasm` UDF, and frames the
-// synthesized bytes as a meta `VA` reply), then decode the returned
-// Profile and assert the merge semantics (newest `updated_at` wins for
-// scalar fields; string-map attrs unioned with newest-wins on
-// collision).
+// WASM UDF path: seed two backends with distinct `Profile` protobufs,
+// read through the gateway (which fans out, runs the prost-based
+// `merge_profile_proto.wasm` UDF, and frames the synthesized bytes as
+// a meta `VA` reply), then decode the returned Profile and assert the
+// merge semantics (newest `updated_at` wins for scalar fields;
+// string-map attrs unioned with newest-wins on collision).
 //
-// The WASM module is baked into /etc/mcgateway/udf/ by the Dockerfile
-// and registered at proxy startup by the UdfLoader; the keyspace at
-// prefix `profile` in the default chart values binds it. A failure in
-// this test means either the wasm file didn't make it into the image,
-// the UdfLoader rejected the module, the VA framing in routes.lua is
-// wrong, or the merge returned bytes that don't round-trip through
-// prost.
+// The module bytes ride an inline-wasm Keyspace CR (see
+// ensureProfileKeyspace); the operator lands them in the state dir
+// and the gateway's UdfLoader compiles and registers them. A failure
+// here means the inline path, the UdfLoader, the VA framing in
+// routes.lua, or the merge's prost round-trip broke.
 func TestWasmProtoMerge(t *testing.T) {
 	s := newSuite(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	ensureProfileKeyspace(t, ctx, s)
 	key := uniqueKey("profile", "proto")
 
 	// Two profiles written directly to the backing pools — not via

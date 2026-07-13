@@ -15,10 +15,78 @@ spec:
       labels:
         {{- include "mcgateway.labels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
+      {{- if not .Values.operator.enabled }}
       annotations:
-        # Force pod restart when config changes.
+        # Force pod restart when config changes. Meaningless in
+        # operator mode, where config arrives via CRs at runtime.
         checksum/config: {{ .Values.config | sha256sum }}
+      {{- end }}
     spec:
+      {{- if .Values.operator.enabled }}
+      serviceAccountName: mcgateway-operator
+      # The API token is mounted into the operator container only (a
+      # projected volume below): the gateway container parses
+      # untrusted memcache traffic and has no business holding
+      # credentials, even read-only ones.
+      automountServiceAccountToken: false
+      # The operator runs as a native sidecar (initContainer with
+      # restartPolicy Always, K8s >= 1.29): kubelet holds the gateway
+      # container until the operator's startup probe passes, and that
+      # probe is its readiness — first successful commit. The gateway
+      # therefore never boots against an empty mount.
+      initContainers:
+        - name: operator
+          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag }}"
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          restartPolicy: Always
+          args:
+            - --dir=/var/run/mcgateway
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            periodSeconds: 1
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/run/mcgateway
+            - name: operator-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      {{- else if .Values.gateway.liveReload }}
+      # Seed the writable state dir from the ConfigMap and the image's
+      # baked-in UDF modules. The gateway then reads (and libmcgateway
+      # watches) the seeded copies, so runtime writes to the state dir
+      # reload the proxy live — no pod restart.
+      initContainers:
+        - name: config-seed
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /var/run/mcgateway/udf
+              cp /config-src/config.lua /var/run/mcgateway/config.lua
+              cp /etc/mcgateway/udf/*.wasm /var/run/mcgateway/udf/ 2>/dev/null || true
+          volumeMounts:
+            - name: config
+              mountPath: /config-src
+            - name: state
+              mountPath: /var/run/mcgateway
+      {{- end }}
       containers:
         - name: gateway
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -38,14 +106,55 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
+          {{- if or .Values.operator.enabled .Values.gateway.liveReload }}
+          env:
+            - name: MCGATEWAY_CONFIG
+              value: /var/run/mcgateway/config.lua
+            - name: MCGW_UDF_DIR
+              value: /var/run/mcgateway/udf
+          volumeMounts:
+            # Kept read-write in v1 so fault-injection tests can write
+            # config files directly (the fail-safe reload tests). The
+            # operator remains the only writer in production; Stage
+            # 5's GCS topology makes read-only structural.
+            - name: state
+              mountPath: /var/run/mcgateway
+          {{- else }}
           volumeMounts:
             - name: config
               mountPath: /etc/mcgateway/config.lua
               subPath: config.lua
+          {{- end }}
       volumes:
+        {{- if not .Values.operator.enabled }}
         - name: config
           configMap:
             name: mcgateway-config
+        {{- end }}
+        {{- if or .Values.operator.enabled .Values.gateway.liveReload }}
+        - name: state
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.operator.enabled }}
+        # Hand-rolled equivalent of the automounted SA volume, scoped
+        # to the operator container above.
+        - name: operator-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

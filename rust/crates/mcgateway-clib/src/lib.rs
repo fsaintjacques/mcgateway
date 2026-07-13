@@ -25,8 +25,10 @@
 
 mod registries;
 mod udf_loader;
+mod watcher;
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use mcgateway_core::{Entry, MergeResult, Registry, Status};
 use mcgateway_wasm_host::WasmHost;
@@ -35,7 +37,32 @@ use mlua::Variadic;
 
 use crate::registries::Registries;
 
-fn build_registries() -> LuaResult<Arc<Registries>> {
+/// Environment variable naming the config file to watch for live
+/// reload. Same variable proxy.lua reads for its `loadfile` path.
+/// Unset → no watcher: standalone deployments keep edit-and-restart
+/// semantics.
+pub const CONFIG_ENV: &str = "MCGATEWAY_CONFIG";
+
+/// Process-global registries, shared by every Lua state in the proxy
+/// (config thread and workers alike). Hot reload requires this: a WASM
+/// table swap published by the watcher thread must be visible to the
+/// state that re-runs `has_merge` during config validation, not just
+/// to whichever state happened to trigger the initial scan. The first
+/// state to require the module pays for the scan; failures are cached
+/// and re-surfaced to every subsequent state.
+static SHARED: OnceLock<Result<Arc<Registries>, String>> = OnceLock::new();
+
+fn rescan_into(host: &WasmHost, registries: &Arc<Registries>, dir: &Path) -> Result<(), String> {
+    let table = udf_loader::scan_dir(host, registries, dir, |path, msg| {
+        // stderr-log for now; structured logging lands with Stage 6.
+        eprintln!("mcgateway_native: udf {} skipped: {msg}", path.display());
+    })
+    .map_err(|e| format!("scan {}: {e}", dir.display()))?;
+    registries.swap_wasm(table);
+    Ok(())
+}
+
+fn init_shared() -> Result<Arc<Registries>, String> {
     let mut builtins = Registry::new();
     mcgateway_core::builtins::register(&mut builtins);
     let registries = Arc::new(Registries::new(builtins));
@@ -44,26 +71,57 @@ fn build_registries() -> LuaResult<Arc<Registries>> {
     // or an explicit MCGW_UDF_DIR pointing at an invalid path — is
     // hard; per-module failures are soft (logged, module skipped) so
     // a single broken file can't take down the gateway's built-ins.
-    let dir = udf_loader::udf_dir()
-        .map_err(|e| LuaError::RuntimeError(format!("mcgateway_native: {e}")))?;
-    if let Some(dir) = dir {
-        let host = WasmHost::new().map_err(|e| {
-            LuaError::RuntimeError(format!("mcgateway_native: wasm host init: {e:#}"))
-        })?;
-        let table = udf_loader::scan_dir(&host, &registries, &dir, |path, msg| {
-            // stdout-log for now; structured logging lands with Stage 6.
-            eprintln!("mcgateway_native: udf {} skipped: {msg}", path.display());
-        })
-        .map_err(|e| {
-            LuaError::RuntimeError(format!(
-                "mcgateway_native: scan {}: {e}",
-                dir.display()
-            ))
-        })?;
-        registries.swap_wasm(table);
+    let dir = udf_loader::udf_dir().map_err(|e| format!("mcgateway_native: {e}"))?;
+    let host = if dir.is_some() {
+        Some(
+            WasmHost::new()
+                .map_err(|e| format!("mcgateway_native: wasm host init: {e:#}"))?,
+        )
+    } else {
+        None
+    };
+    if let (Some(dir), Some(host)) = (&dir, &host) {
+        rescan_into(host, &registries, dir).map_err(|e| format!("mcgateway_native: {e}"))?;
+    }
+
+    // Live reload: only armed when the config path is explicit. The
+    // reload signal is process-directed (`kill(getpid())`), not
+    // `raise()`: raise targets the calling thread, and a thread that
+    // inherited a blocked SIGHUP would hold the signal pending forever.
+    if let Ok(config_path) = std::env::var(CONFIG_ENV) {
+        let rescan: Box<dyn Fn() + Send> = match (&dir, &host) {
+            (Some(dir), Some(host)) => {
+                let (host, registries, dir) = (host.clone(), registries.clone(), dir.clone());
+                Box::new(move || {
+                    if let Err(e) = rescan_into(&host, &registries, &dir) {
+                        eprintln!("mcgateway_native: udf rescan failed (keeping previous table): {e}");
+                    }
+                })
+            }
+            _ => Box::new(|| {}),
+        };
+        watcher::spawn(
+            watcher::Plan::new(PathBuf::from(&config_path), dir),
+            rescan,
+            || {
+                eprintln!("mcgateway_native: change detected; requesting proxy reload (SIGHUP)");
+                unsafe {
+                    libc::kill(libc::getpid(), libc::SIGHUP);
+                }
+            },
+        )
+        .map_err(|e| format!("mcgateway_native: watcher: {e}"))?;
+        eprintln!("mcgateway_native: live reload armed for {config_path}");
     }
 
     Ok(registries)
+}
+
+fn build_registries() -> LuaResult<Arc<Registries>> {
+    SHARED
+        .get_or_init(init_shared)
+        .clone()
+        .map_err(LuaError::RuntimeError)
 }
 
 fn parse_status(s: &[u8]) -> LuaResult<Status> {

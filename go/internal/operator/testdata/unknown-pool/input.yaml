@@ -1,0 +1,15 @@
+pools:
+  - metadata: {name: mc-a}
+    spec:
+      addrs: ["mc-a:11211"]
+keyspaces:
+  - metadata: {name: good}
+    spec:
+      prefix: good
+      read: [mc-a]
+      write: [mc-a]
+  - metadata: {name: stray}
+    spec:
+      prefix: stray
+      read: [mc-x]
+      write: [mc-a]
