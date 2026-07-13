@@ -1,0 +1,7 @@
+Pool "bad-hash": skipped: invalid hash "sha512"
+Keyspace "bad-merge": skipped: merge "not_registered" is neither a built-in nor an inline module in this snapshot
+Keyspace "bad-policy": skipped: invalid writePolicy "quorum"
+Keyspace "colon": skipped: prefix "a:b" must not contain ':'
+Keyspace "dup-read": skipped: read lists pool "mc-a" twice
+Keyspace "reserved": skipped: prefix "__udf" is reserved
+Keyspace "uses-bad-pool": skipped: read[0] references unknown pool "bad-hash"

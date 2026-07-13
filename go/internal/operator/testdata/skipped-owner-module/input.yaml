@@ -1,0 +1,27 @@
+pools:
+  - metadata: {name: mc-a}
+    spec:
+      addrs: ["mc-a:11211"]
+keyspaces:
+  - metadata: {name: bad-owner}
+    spec:
+      prefix: __udf
+      read: [mc-a]
+      write: [mc-a]
+      merge:
+        name: donated_merge
+        wasm: ZmFrZS13YXNtLW1vZHVsZS1vbmU=
+  - metadata: {name: borrower}
+    spec:
+      prefix: borrower
+      read: [mc-a]
+      write: [mc-a]
+      merge: {name: donated_merge}
+  - metadata: {name: orphan-owner}
+    spec:
+      prefix: "or:phan"
+      read: [mc-a]
+      write: [mc-a]
+      merge:
+        name: orphan_merge
+        wasm: b3JwaGFuLXdhc20tbW9kdWxl

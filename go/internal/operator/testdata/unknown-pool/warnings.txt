@@ -1,0 +1,1 @@
+Keyspace "stray": skipped: read[0] references unknown pool "mc-x"

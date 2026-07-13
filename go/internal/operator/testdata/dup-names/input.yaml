@@ -1,0 +1,26 @@
+pools:
+  - metadata: {name: twin}
+    spec:
+      addrs: ["twin-1:11211"]
+  - metadata: {name: twin}
+    spec:
+      addrs: ["twin-2:11211"]
+  - metadata: {name: mc-a}
+    spec:
+      addrs: ["mc-a:11211"]
+keyspaces:
+  - metadata: {name: twin-ks}
+    spec:
+      prefix: alpha
+      read: [mc-a]
+      write: [mc-a]
+  - metadata: {name: twin-ks}
+    spec:
+      prefix: beta
+      read: [mc-a]
+      write: [mc-a]
+  - metadata: {name: survivor}
+    spec:
+      prefix: survivor
+      read: [mc-a]
+      write: [mc-a]

@@ -1,0 +1,46 @@
+pools:
+  - metadata: {name: mc-a}
+    spec:
+      addrs: ["mc-a:11211"]
+  - metadata: {name: bad-hash}
+    spec:
+      addrs: ["x:1"]
+      hash: sha512
+keyspaces:
+  - metadata: {name: survivor}
+    spec:
+      prefix: survivor
+      read: [mc-a]
+      write: [mc-a]
+  - metadata: {name: colon}
+    spec:
+      prefix: "a:b"
+      read: [mc-a]
+      write: [mc-a]
+  - metadata: {name: reserved}
+    spec:
+      prefix: __udf
+      read: [mc-a]
+      write: [mc-a]
+  - metadata: {name: dup-read}
+    spec:
+      prefix: dupread
+      read: [mc-a, mc-a]
+      write: [mc-a]
+  - metadata: {name: bad-policy}
+    spec:
+      prefix: badpolicy
+      read: [mc-a]
+      write: [mc-a]
+      writePolicy: quorum
+  - metadata: {name: bad-merge}
+    spec:
+      prefix: badmerge
+      read: [mc-a]
+      write: [mc-a]
+      merge: {name: not_registered}
+  - metadata: {name: uses-bad-pool}
+    spec:
+      prefix: badpool
+      read: [bad-hash]
+      write: [mc-a]

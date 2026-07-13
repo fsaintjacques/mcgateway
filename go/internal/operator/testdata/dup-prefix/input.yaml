@@ -1,0 +1,16 @@
+pools:
+  - metadata: {name: mc-a}
+    spec:
+      addrs: ["mc-a:11211"]
+keyspaces:
+  - metadata: {name: b-second}
+    spec:
+      prefix: contested
+      read: [mc-a]
+      write: [mc-a]
+  - metadata: {name: a-first}
+    spec:
+      prefix: contested
+      read: [mc-a]
+      write: [mc-a]
+      writePolicy: first

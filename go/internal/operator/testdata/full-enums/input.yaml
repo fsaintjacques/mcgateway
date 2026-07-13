@@ -1,0 +1,26 @@
+pools:
+  - metadata: {name: mc-a}
+    spec:
+      addrs: ["mc-a:11211", "mc-a-2:11211"]
+      hash: xxhash
+      dist: ring_hash
+  - metadata: {name: mc-b}
+    spec:
+      addrs: ["mc-b:11211"]
+      hash: md5
+      dist: jump_hash
+keyspaces:
+  - metadata: {name: session}
+    spec:
+      prefix: session
+      read: [mc-a, mc-b]
+      write: [mc-a, mc-b]
+      writePolicy: first
+      merge: {name: pool-preferred}
+  - metadata: {name: profile}
+    spec:
+      prefix: profile
+      read: [mc-b, mc-a]
+      write: [mc-b]
+      writePolicy: all
+      merge: {name: last-write-wins}

@@ -1,0 +1,2 @@
+Keyspace "bad-owner": skipped: prefix "__udf" is reserved
+Keyspace "orphan-owner": skipped: prefix "or:phan" must not contain ':'

@@ -1,0 +1,13 @@
+pools:
+  - metadata: {name: mc-a}
+    spec:
+      addrs: ["mc-a:11211"]
+keyspaces:
+  - metadata: {name: shadowed}
+    spec:
+      prefix: shadowed
+      read: [mc-a]
+      write: [mc-a]
+      merge:
+        name: first-hit
+        wasm: ZmFrZS13YXNtLW1vZHVsZS1vbmU=
