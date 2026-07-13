@@ -1,11 +1,12 @@
 .PHONY: build check test test-kind clean rust-build rust-check generate \
-        docker-build kind-up kind-down kind-load \
-        helm-install-kind helm-uninstall-kind
+        docker-build docker-build-gateway docker-build-operator \
+        kind-up kind-down kind-load helm-install-kind helm-uninstall-kind
 
 # --- Build ---
 
 build: rust-build
 	cd go && go build ./...
+	cd go && go build -o bin/mcgateway-operator ./cmd/mcgateway-operator
 
 rust-build:
 	cd rust && cargo build --release
@@ -76,6 +77,7 @@ KIND_CLUSTER_NAME ?= mcgateway
 KIND_PROVIDER     ?= $(shell [ -n "$$GITHUB_ACTIONS" ] && echo docker || \
                        (command -v podman >/dev/null 2>&1 && echo podman || echo docker))
 MCGATEWAY_IMAGE   ?= $(shell [ "$(KIND_PROVIDER)" = "podman" ] && echo localhost/mcgateway:dev || echo mcgateway:dev)
+MCGATEWAY_OPERATOR_IMAGE ?= $(shell [ "$(KIND_PROVIDER)" = "podman" ] && echo localhost/mcgateway-operator:dev || echo mcgateway-operator:dev)
 # Split on the *last* colon only so registries with a port survive:
 # `localhost:5001/mcgateway:dev` -> repo=localhost:5001/mcgateway, tag=dev.
 MCGATEWAY_IMAGE_REPO = $(shell printf '%s' '$(MCGATEWAY_IMAGE)' | sed -e 's/:[^:]*$$//')
@@ -86,8 +88,13 @@ export KIND_EXPERIMENTAL_PROVIDER = $(KIND_PROVIDER)
 # Extra flags injected by CI (buildx --load and gha layer-cache flags).
 DOCKER_BUILD_ARGS ?=
 
-docker-build:
+docker-build: docker-build-gateway docker-build-operator
+
+docker-build-gateway:
 	$(KIND_PROVIDER) build $(DOCKER_BUILD_ARGS) -t $(MCGATEWAY_IMAGE) -f docker/Dockerfile .
+
+docker-build-operator:
+	$(KIND_PROVIDER) build $(DOCKER_BUILD_ARGS) -t $(MCGATEWAY_OPERATOR_IMAGE) -f docker/Dockerfile.operator .
 
 kind-up:
 	kind create cluster --name $(KIND_CLUSTER_NAME) --config k8s/kind/cluster.yaml
@@ -101,11 +108,11 @@ kind-down:
 # tarball and loading via `kind load image-archive`.
 kind-load: docker-build
 ifeq ($(KIND_PROVIDER),podman)
-	podman save $(MCGATEWAY_IMAGE) -o /tmp/mcgateway-kind.tar
+	podman save -m $(MCGATEWAY_IMAGE) $(MCGATEWAY_OPERATOR_IMAGE) -o /tmp/mcgateway-kind.tar
 	kind load image-archive /tmp/mcgateway-kind.tar --name $(KIND_CLUSTER_NAME)
 	rm -f /tmp/mcgateway-kind.tar
 else
-	kind load docker-image $(MCGATEWAY_IMAGE) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(MCGATEWAY_IMAGE) $(MCGATEWAY_OPERATOR_IMAGE) --name $(KIND_CLUSTER_NAME)
 endif
 
 HELM_RELEASE_NAME ?= mcgateway
