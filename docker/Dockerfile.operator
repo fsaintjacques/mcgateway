@@ -1,0 +1,18 @@
+# Build the mcgateway operator: a static Go binary on a distroless
+# base. No shell, no libc, runs as nonroot; the binary is the image.
+FROM golang:1.26-alpine AS build
+
+WORKDIR /src
+COPY go/go.mod go/go.sum ./
+RUN go mod download
+
+COPY go/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+        -o /out/mcgateway-operator ./cmd/mcgateway-operator
+
+FROM gcr.io/distroless/static:nonroot
+
+COPY --from=build /out/mcgateway-operator /mcgateway-operator
+
+USER nonroot
+ENTRYPOINT ["/mcgateway-operator"]
