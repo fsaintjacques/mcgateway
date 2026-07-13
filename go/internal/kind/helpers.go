@@ -18,6 +18,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -25,6 +26,9 @@ import (
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/transport/spdy"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	v1alpha1 "github.com/fsaintjacques/mcgateway/go/api/v1alpha1"
 )
 
 // ReleaseNamespace is where the Helm chart installs the gateway + backends.
@@ -132,6 +136,21 @@ func ExecInPod(ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, n
 		Stderr: &stderr,
 	})
 	return stdout.String(), stderr.String(), err
+}
+
+// CRClient returns a controller-runtime client that speaks the
+// mcgateway CRD types, for tests that drive the operator via CRs.
+func CRClient(t *testing.T, cfg *rest.Config) crclient.Client {
+	t.Helper()
+	sch := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(sch); err != nil {
+		t.Fatalf("build scheme: %v", err)
+	}
+	cl, err := crclient.New(cfg, crclient.Options{Scheme: sch})
+	if err != nil {
+		t.Fatalf("create CR client: %v", err)
+	}
+	return cl
 }
 
 // PodLogs returns the tail of a container's log.

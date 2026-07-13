@@ -82,6 +82,8 @@ MCGATEWAY_OPERATOR_IMAGE ?= $(shell [ "$(KIND_PROVIDER)" = "podman" ] && echo lo
 # `localhost:5001/mcgateway:dev` -> repo=localhost:5001/mcgateway, tag=dev.
 MCGATEWAY_IMAGE_REPO = $(shell printf '%s' '$(MCGATEWAY_IMAGE)' | sed -e 's/:[^:]*$$//')
 MCGATEWAY_IMAGE_TAG  = $(shell printf '%s' '$(MCGATEWAY_IMAGE)' | sed -e 's/^.*://')
+MCGATEWAY_OPERATOR_IMAGE_REPO = $(shell printf '%s' '$(MCGATEWAY_OPERATOR_IMAGE)' | sed -e 's/:[^:]*$$//')
+MCGATEWAY_OPERATOR_IMAGE_TAG  = $(shell printf '%s' '$(MCGATEWAY_OPERATOR_IMAGE)' | sed -e 's/^.*://')
 
 export KIND_EXPERIMENTAL_PROVIDER = $(KIND_PROVIDER)
 
@@ -124,6 +126,8 @@ helm-install-kind: kind-load
 		-f ./k8s/charts/mcgateway/values-kind.yaml \
 		--set image.repository=$(MCGATEWAY_IMAGE_REPO) \
 		--set image.tag=$(MCGATEWAY_IMAGE_TAG) \
+		--set operator.image.repository=$(MCGATEWAY_OPERATOR_IMAGE_REPO) \
+		--set operator.image.tag=$(MCGATEWAY_OPERATOR_IMAGE_TAG) \
 		--wait
 
 helm-uninstall-kind:

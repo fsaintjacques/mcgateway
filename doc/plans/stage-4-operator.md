@@ -294,6 +294,13 @@ leader over, and CR-to-fleet propagation is exactly as fast as each
 pod's watch stream. Scale-up needs no reconcile-on-pod-event logic:
 a new pod's sidecar does a full render on start, by construction.
 
+(Implementation note: v1 mounts the state dir read-write in the
+gateway container too, not RO as diagrammed — the fail-safe reload
+kind tests inject faults by writing config files directly through the
+gateway container, and an emptyDir inside one pod is not a security
+boundary. The operator remains the only writer in production; Stage
+5's GCS topology makes read-only structural.)
+
 The **native sidecar** form (an initContainer with
 `restartPolicy: Always`, GA since K8s 1.29 and available in kind's
 default node image) buys the startup ordering for free: kubelet holds

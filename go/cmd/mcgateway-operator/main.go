@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -57,6 +58,22 @@ func run(dir, namespace, healthAddr string) error {
 	ns, err := resolveNamespace(namespace)
 	if err != nil {
 		return err
+	}
+
+	// The gateway fails loudly when MCGW_UDF_DIR points at a missing
+	// directory, and the committer only creates it when a module is
+	// written — so guarantee the empty shape up front, before
+	// readiness lets the gateway container start. World-writable
+	// (explicit Chmod: MkdirAll is umask-clipped) because the gateway
+	// container runs as a different uid and writes its AOT cache
+	// under this dir — and an emptyDir inside one pod is not a
+	// security boundary.
+	udfDir := filepath.Join(dir, operator.UdfDir)
+	if err := os.MkdirAll(udfDir, 0o777); err != nil {
+		return fmt.Errorf("create udf dir: %w", err)
+	}
+	if err := os.Chmod(udfDir, 0o777); err != nil {
+		return fmt.Errorf("chmod udf dir: %w", err)
 	}
 
 	scheme := runtime.NewScheme()
