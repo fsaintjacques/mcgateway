@@ -1,12 +1,14 @@
 -- Build entry tables from per-pool responses.
 --
 -- Entry shape:
---   { key, pool, status = "hit"|"miss"|"error", res, t }
+--   { key, pool, status = "hit"|"miss"|"error", res, t, elapsed }
 --
 -- `res` is the mcp.response userdata or nil. `t` is the parsed integer
 -- value of the meta `t` flag (TTL remaining) when present in the response
--- line, otherwise nil. Merge functions that want other flags can parse
--- `res:line()` themselves.
+-- line, otherwise nil. `elapsed` is the backend request time in
+-- microseconds (res:elapsed(), stamped by the proxy when the response
+-- is handled) — consumed by the metrics path, not by merges. Merge
+-- functions that want other flags can parse `res:line()` themselves.
 
 local M = {}
 
@@ -42,7 +44,13 @@ end
 -- allocates a fresh string on each `res:value()` call regardless.
 function M.make(key, pool_name, res)
     local status = classify(res)
-    local t, value, line
+    local t, value, line, elapsed
+    -- Errors carry timing too when a concrete response exists. The
+    -- method check keeps fakes (and hypothetical older proxies) from
+    -- turning missing timing into a request failure.
+    if res and res.elapsed then
+        elapsed = res:elapsed()
+    end
     if status == "hit" and res then
         line = res:line()
         if line then t = parse_t(line) end
@@ -69,6 +77,7 @@ function M.make(key, pool_name, res)
         t = t,
         value = value,
         line = line,
+        elapsed = elapsed,
     }
 end
 

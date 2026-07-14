@@ -18,18 +18,40 @@ use metrics::{Metrics, TokenBucket};
 
 /// One label set per family so the output order is fully
 /// deterministic (families encode in registration order; label sets
-/// within a family iterate a `HashMap`).
+/// within a family iterate a `HashMap`). Histograms are pinned by the
+/// dedicated test below — their bucket fan-out would drown this one.
 #[test]
 fn exposition_golden() {
     let m = Metrics::new();
+    m.observe_request("user", "read", "hit", None);
+    m.observe_backend("mc-a", "hit", None);
+    m.merge_error("angry", "deadline");
+    m.config_reload("ok", 2, 5);
     m.set_registry_merges("builtin", 3);
     m.udf_rescan("ok");
     m.udf_rescan("ok");
     m.udf_module_failure("load-failed");
     m.reload_signal("config");
-    m.merge_error("angry", "deadline");
 
     let expected = "\
+# HELP mcgateway_requests Requests by keyspace, op, and outcome.
+# TYPE mcgateway_requests counter
+mcgateway_requests_total{keyspace=\"user\",op=\"read\",outcome=\"hit\"} 1
+# HELP mcgateway_backend_requests Per-pool backend results by status.
+# TYPE mcgateway_backend_requests counter
+mcgateway_backend_requests_total{pool=\"mc-a\",status=\"hit\"} 1
+# HELP mcgateway_merge_errors Failed WASM merge calls by module and error kind.
+# TYPE mcgateway_merge_errors counter
+mcgateway_merge_errors_total{merge=\"angry\",kind=\"deadline\"} 1
+# HELP mcgateway_config_reloads Config loads by result (fallback = kept previous config).
+# TYPE mcgateway_config_reloads counter
+mcgateway_config_reloads_total{result=\"ok\"} 1
+# HELP mcgateway_config_pools Pools in the config currently serving.
+# TYPE mcgateway_config_pools gauge
+mcgateway_config_pools 2
+# HELP mcgateway_config_keyspaces Keyspaces in the config currently serving.
+# TYPE mcgateway_config_keyspaces gauge
+mcgateway_config_keyspaces 5
 # HELP mcgateway_registry_merges Registered merge functions by kind.
 # TYPE mcgateway_registry_merges gauge
 mcgateway_registry_merges{kind=\"builtin\"} 3
@@ -42,22 +64,72 @@ mcgateway_udf_module_failures_total{reason=\"load-failed\"} 1
 # HELP mcgateway_reload_signals Proxy reloads (SIGHUP) requested by the file watcher by trigger.
 # TYPE mcgateway_reload_signals counter
 mcgateway_reload_signals_total{trigger=\"config\"} 1
-# HELP mcgateway_merge_errors Failed WASM merge calls by module and error kind.
-# TYPE mcgateway_merge_errors counter
-mcgateway_merge_errors_total{merge=\"angry\",kind=\"deadline\"} 1
 # EOF
 ";
     assert_eq!(m.encode(), expected);
 }
 
 #[test]
-fn empty_registry_encodes_bare_eof() {
-    // prometheus-client skips families with no observations entirely
-    // (descriptor included), so an idle registry is just the EOF
-    // marker. Pinned because consumers must not assume a series
-    // exists before its first observation.
+fn empty_registry_encodes_gauges_and_eof() {
+    // prometheus-client skips *families* with no observations entirely
+    // (descriptor included) — consumers must not assume a series
+    // exists before its first observation. Bare gauges (config shape)
+    // always encode, starting at zero.
     let m = Metrics::new();
-    assert_eq!(m.encode(), "# EOF\n");
+    let expected = "\
+# HELP mcgateway_config_pools Pools in the config currently serving.
+# TYPE mcgateway_config_pools gauge
+mcgateway_config_pools 0
+# HELP mcgateway_config_keyspaces Keyspaces in the config currently serving.
+# TYPE mcgateway_config_keyspaces gauge
+mcgateway_config_keyspaces 0
+# EOF
+";
+    assert_eq!(m.encode(), expected);
+}
+
+#[test]
+fn histogram_exposition_shape() {
+    let m = Metrics::new();
+    // 0.0003 lands in the 0.0004 bucket; 0.05 in 0.0512.
+    m.observe_request("user", "read", "hit", Some(0.0003));
+    m.observe_backend("mc-a", "hit", Some(0.05));
+    m.observe_merge_duration("first-hit", 0.00002);
+
+    let out = m.encode();
+    assert!(out.contains("# TYPE mcgateway_request_duration_seconds histogram"), "{out}");
+    assert!(
+        out.contains(
+            r#"mcgateway_request_duration_seconds_bucket{le="0.0004",keyspace="user",op="read"} 1"#
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#"mcgateway_request_duration_seconds_count{keyspace="user",op="read"} 1"#),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#"mcgateway_request_duration_seconds_sum{keyspace="user",op="read"} 0.0003"#),
+        "{out}"
+    );
+    // The +Inf bucket must exist so the histogram is complete.
+    assert!(
+        out.contains(
+            r#"mcgateway_request_duration_seconds_bucket{le="+Inf",keyspace="user",op="read"} 1"#
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#"mcgateway_backend_duration_seconds_bucket{le="0.0512",pool="mc-a"} 1"#),
+        "{out}"
+    );
+    assert!(
+        out.contains(r#"mcgateway_merge_duration_seconds_bucket{le="2e-5",merge="first-hit"} 1"#)
+            || out.contains(
+                r#"mcgateway_merge_duration_seconds_bucket{le="0.00002",merge="first-hit"} 1"#
+            ),
+        "{out}"
+    );
 }
 
 #[test]
@@ -164,4 +236,37 @@ fn exporter_rejects_other_paths_and_methods() {
 fn exporter_bind_failure_is_an_error_not_a_panic() {
     let err = metrics::spawn_exporter("256.256.256.256:0", leak_metrics()).unwrap_err();
     assert!(err.contains("bind"), "{err}");
+}
+
+/// Micro-benchmark for the per-read observation set (stage 6 exit
+/// criterion: ≤ 2 µs added per request). Ignored by default — timing
+/// assertions flake under CI load; run manually with
+/// `cargo test -p mcgateway-clib --test metrics -- --ignored --nocapture`.
+#[test]
+#[ignore = "manual benchmark, run with --ignored --nocapture"]
+fn bench_read_observation_set() {
+    const ITERS: u32 = 200_000;
+    let m = leak_metrics();
+    // Steady state: label sets already exist (the first request per
+    // keyspace pays the insert; every later one is the lookup path).
+    m.observe_request("user", "read", "hit", Some(0.0005));
+    m.observe_backend("mc-a", "hit", Some(0.0002));
+    m.observe_backend("mc-b", "miss", Some(0.0003));
+    m.observe_merge_duration("first-hit", 0.00002);
+
+    let start = std::time::Instant::now();
+    for _ in 0..ITERS {
+        // One fan-out read over two pools: request outcome + duration,
+        // two backend observations, one merge duration.
+        m.observe_request("user", "read", "hit", Some(0.0005));
+        m.observe_backend("mc-a", "hit", Some(0.0002));
+        m.observe_backend("mc-b", "miss", Some(0.0003));
+        m.observe_merge_duration("first-hit", 0.00002);
+    }
+    let per_request = start.elapsed() / ITERS;
+    println!("read observation set: {per_request:?} per request");
+    assert!(
+        per_request < Duration::from_micros(2),
+        "budget is 2 µs, measured {per_request:?}"
+    );
 }

@@ -9,6 +9,20 @@ local M = {
     _last_good = nil,
 }
 
+-- Report a config-load outcome to the native metrics, best-effort.
+-- Every step is guarded: the stage-4 fallback design made "keep
+-- serving the last good config" independent of the native module's
+-- health (see keyspaces.lua), and metrics must not re-couple survival
+-- to it. A gateway that cannot count reloads must still reload.
+local function observe_reload(result, cfg)
+    local ok, native = pcall(require, "mcgateway_native")
+    if not ok or type(native) ~= "table"
+        or type(native.observe_reload) ~= "function" then
+        return
+    end
+    pcall(native.observe_reload, result, #cfg.pools, #cfg.keyspaces)
+end
+
 -- load_config reads and validates the config file. A failure on the
 -- *first* load is fatal: a gateway must not start without a config.
 -- A failure on a later load (SIGHUP reload) falls back to the last
@@ -28,12 +42,15 @@ function M.load_config(path)
         util.log("config reload from %s failed, keeping previous config: %s",
             path, tostring(cfg))
         M._config = M._last_good
+        -- Gauges reflect what is actually serving: the last good.
+        observe_reload("fallback", M._config)
         return M._config
     end
     M._last_good = cfg
     M._config = cfg
     util.log("loaded config from %s: %d pools, %d keyspaces",
         path, #cfg.pools, #cfg.keyspaces)
+    observe_reload("ok", cfg)
     return cfg
 end
 
