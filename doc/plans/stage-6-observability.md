@@ -53,8 +53,8 @@ Concretely:
    policy: render warnings — today log-only — become an alertable
    signal.
 5. `k8s/charts/mcgateway` exposes the ports, adds scrape annotations by
-   default, and gates a `ServiceMonitor` and a Grafana dashboard behind
-   values for clusters that run the Prometheus/Grafana operators.
+   default, and gates a `ServiceMonitor` behind a value for clusters
+   that run the Prometheus operator.
 6. The clib's `eprintln!` logging becomes leveled and, on per-request
    paths, rate-limited — the "structured logging lands with Stage 6"
    note in `lib.rs` comes due. Still line-oriented stderr; levels and
@@ -89,9 +89,11 @@ This stage exists to prove:
   is what only the routing layer can see.
 - **Per-key or per-client metrics.** Unbounded cardinality. Labels
   come from configured names only (see Cardinality).
-- **Alerting rules (`PrometheusRule`).** Which thresholds page is a
-  deployment's decision; the dashboard documents the queries worth
-  alerting on.
+- **Alerting rules (`PrometheusRule`) and Grafana dashboards.** Which
+  thresholds page — and how a deployment visualizes — are that
+  deployment's decisions; shipping a dashboard JSON in the chart is a
+  bit-rot magnet no test executes. The metric inventory below is the
+  stable contract to build either on.
 - **A metrics push path or OpenMetrics/protobuf exposition.** Pull +
   text format is universal and testable with `wget`.
 - **Changing any routing, merge, or reload behavior.** Instrumentation
@@ -114,7 +116,7 @@ This stage exists to prove:
 | Registry gauges (built-in/wasm merges), UDF rescan counters, SIGHUP trigger counters | ✓ |
 | Leveled logging in the clib (`log` facade over stderr, rate-limited request-path errors) | ✓ |
 | Operator: controller-runtime metrics endpoint + render-warning/commit metrics | ✓ |
-| Chart: metrics ports, scrape annotations, gated `ServiceMonitor`, gated Grafana dashboard | ✓ |
+| Chart: metrics ports, scrape annotations, gated `ServiceMonitor` | ✓ |
 | Kind tests: scrape assertions for data path, fallback counter, operator warnings | ✓ |
 | Tracing/OTel, memcached core-stat re-export | — (non-goal) |
 | Per-key/per-client labels, push exposition | — (non-goal) |
@@ -143,8 +145,6 @@ go/internal/operator/metrics.go  NEW  render-warning gauge, commit counters
 k8s/charts/mcgateway/
   templates/deployment.yaml      (edited) metrics ports, scrape annotations, env
   templates/servicemonitor.yaml  NEW  gated on metrics.serviceMonitor.enabled
-  templates/dashboard.yaml       NEW  gated ConfigMap, grafana_dashboard label
-  dashboards/mcgateway.json      NEW  the dashboard, jq-linted in `make check`
   values.yaml                    (edited) metrics.* block
 go/internal/kind/metrics_test.go NEW  scrape assertions
 doc/plans/stage-6-observability.md  (this file)
@@ -239,11 +239,14 @@ construction on the same inputs.
 ### Write path: one small hook
 
 Writes never cross the FFI today, so they get the minimal crossing:
-`mcgw_native.observe_write(prefix, policy, outcome, start)`, called
-where the handler already computes the answer — `reduce_write_all`'s
-rank *is* the outcome label (`stored` / `negative` / `error`), and the
-`first` policy classifies its single response the same way. Two FFI
-calls per write (`now` + `observe_write`), strings and integers only.
+`mcgw_native.observe(prefix, op, outcome, start)`, called where the
+handler already computes the answer — `reduce_write_all`'s rank *is*
+the outcome label (`stored` / `negative` / `error`), and the `first`
+policy classifies its single response the same way. The same hook,
+with `start = nil`, counts the sentinel routes. Two FFI calls per
+write (`now` + `observe`), strings and integers only. Policy is not a
+label: it is a per-keyspace constant, so it would only duplicate what
+the config already says.
 
 ### Reload path: make the fallback alertable
 
@@ -293,7 +296,7 @@ Gateway (`libmcgateway`, `:9151`), all prefixed `mcgateway_`:
 
 | Metric | Type | Labels | Source |
 |---|---|---|---|
-| `requests_total` | counter | `keyspace`, `op`=read\|write, `outcome` (read: hit\|miss\|error; write: stored\|negative\|error) | merge dispatch / `observe_write` |
+| `requests_total` | counter | `keyspace`, `op`=read\|write, `outcome` (read: hit\|miss\|error; write: stored\|negative\|error) | merge dispatch / `observe` |
 | `request_duration_seconds` | histogram | `keyspace`, `op` | `start` → hook return |
 | `backend_requests_total` | counter | `pool`, `status`=hit\|miss\|error | entry statuses in dispatch |
 | `backend_duration_seconds` | histogram | `pool` | entry `elapsed` |
@@ -374,19 +377,14 @@ for a Stage 4 kind test and stays byte-stable).
   `ServiceMonitor` for both ports. Off by default because it requires
   the Prometheus operator's CRDs — installing it into a cluster
   without them fails the release.
-- `metrics.dashboard.enabled` (default `false`): renders
-  `dashboards/mcgateway.json` into a ConfigMap labeled
-  `grafana_dashboard: "1"` (the kube-prometheus-stack sidecar
-  convention). The dashboard covers: request rate/outcome by keyspace,
-  request latency quantiles, backend latency and error rate by pool,
-  merge duration and error rate by merge, reload health (fallback
-  counter + config gauges), and operator warnings.
 - All three modes (operator / liveReload / static) get metrics — the
   exposition depends only on the clib, not on how config arrives.
 
-`make check` gains a `jq empty` pass over `dashboards/*.json` so a
-malformed dashboard fails CI; anything deeper (does it render?) is
-manual and accepted as such.
+No dashboard ships in the chart (see Non-goals): the queries worth
+graphing — request rate/outcome by keyspace, latency quantiles,
+backend latency/error rate by pool, merge duration and error rate,
+reload fallbacks, operator warnings — follow directly from the metric
+inventory, which is the supported contract.
 
 ---
 
@@ -410,7 +408,7 @@ Budget: ≤ 2 µs added per call. This is the number that makes
 ### Lua unit
 
 The fake `mcgateway_native` preload (three tests use it) grows `now`,
-`observe_write`, and `observe_reload` as recording stubs, and `merge`
+`observe`, and `observe_reload` as recording stubs, and `merge`
 accepts the optional third argument. New assertions: the read handler
 passes `prefix`/`start` through; write handlers classify outcomes onto
 the recorded calls; `load_config` reports `ok` and `fallback`
@@ -465,11 +463,8 @@ Stage 6 is done when all of the following hold:
    FFI call.
 5. `helm install` with defaults exposes and annotates both endpoints;
    with `metrics.enabled=false`, the rendered manifests are
-   env-var-and-port-identical to Stage 4's output; ServiceMonitor and
-   dashboard render only when enabled.
-6. The dashboard JSON is committed, jq-clean, and its queries use only
-   inventory metrics (a grep-level check, honestly enforced by
-   review).
+   env-var-and-port-identical to Stage 4's output; the ServiceMonitor
+   renders only when enabled.
 
 ---
 
@@ -497,7 +492,7 @@ The stage's risk budget, so its verification items live here, first:
 request time (spike in the fixture harness before building on it),
 and the micro-benchmark pins the dispatch overhead. Then:
 `entries.lua` `elapsed`, `merge` opts (`prefix`, `start`),
-`mcgw_native.now`/`observe_write`/`observe_reload`, read/write/reload
+`mcgw_native.now`/`observe`/`observe_reload`, read/write/reload
 instrumentation in `routes.lua` and `mcgateway.lua`, sentinel
 counters, and the Lua test updates (recording fakes, non-fatality of
 the observe hooks). Needs step 1.
@@ -509,12 +504,11 @@ Enable the manager's metrics endpoint (`--metrics-addr`), add
 snapshot gauges), unit assertions in the existing reconciler tests.
 Independent of steps 1–2 — can land in either order.
 
-### Step 4 — Chart, dashboard, kind suite (helm + go)
+### Step 4 — Chart and kind suite (helm + go)
 
-`metrics.*` values, ports/annotations/env across all three modes,
-gated ServiceMonitor and dashboard ConfigMap, `dashboards/mcgateway.json`,
-the jq lint in `make check`, and the four kind tests. Exit criteria
-close here. Needs steps 1–3.
+`metrics.*` values, ports/annotations/env across all three modes, the
+gated ServiceMonitor, and the kind tests. Exit criteria close here.
+Needs steps 1–3.
 
 Dependency shape: `{1, 3} → 2 → 4` (3 only truly blocks 4).
 
@@ -550,14 +544,10 @@ Dependency shape: `{1, 3} → 2 → 4` (3 only truly blocks 4).
   stale series (accepted, documented above). The subtle trap is
   *reusing* a prefix after deletion: the old counter continues, which
   is correct for `rate()` but can surprise a human reading raw totals.
-  Documented in the dashboard, not "fixed."
-- **Dashboard bit-rot.** A JSON blob no test executes. Mitigations are
-  cheap and partial: jq lint in CI, inventory-only metric names by
-  review, keep the dashboard small enough to re-verify manually when
-  the inventory changes. Accepted as the cost of shipping one.
+  A documentation fact, not something to "fix."
 - **Two FFI calls per write vs zero today.** Writes gain the larger
   relative overhead (reads already crossed for the merge). If the
-  benchmark shows the write hook mattering, `observe_write` can take
+  benchmark shows the write hook mattering, `observe` can take
   the `now()` reading itself (one call, duration measured Rust-side
   from enqueue is lost — but write outcome/rate matter more than write
   latency split). Kept as the documented fallback, not the default.
