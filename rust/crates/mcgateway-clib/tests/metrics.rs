@@ -270,3 +270,50 @@ fn bench_read_observation_set() {
         "budget is 2 µs, measured {per_request:?}"
     );
 }
+
+/// A client trickling bytes must not hold the (serial) exporter past
+/// the connection deadline: the budget spans the whole scrape, not
+/// each read — a per-syscall timeout would reset on every byte.
+#[test]
+fn slow_client_is_cut_off_at_the_deadline() {
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let m = leak_metrics();
+
+    let client = std::thread::spawn(move || {
+        let mut c = TcpStream::connect(addr).unwrap();
+        // A request line that never finishes, one byte at a time —
+        // each read succeeds, so only a whole-connection deadline can
+        // end this. Stop when the server hangs up.
+        for _ in 0..500 {
+            if c.write_all(b"G").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    let (mut server, _) = listener.accept().unwrap();
+    let started = Instant::now();
+    let err = metrics::serve_one_until(&mut server, m, started + Duration::from_millis(200))
+        .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "cut-off took {:?}, want ~the 200ms deadline",
+        started.elapsed()
+    );
+    // Deadline exhaustion mid-loop reports TimedOut; a read blocked at
+    // expiry surfaces the socket timeout (WouldBlock on unix).
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ),
+        "unexpected error: {err}"
+    );
+    drop(server);
+    client.join().unwrap();
+}

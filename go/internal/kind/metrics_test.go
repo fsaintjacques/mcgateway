@@ -173,9 +173,17 @@ func TestMetricsReloadFallback(t *testing.T) {
 		}
 		return metricValue(exposition, `mcgateway_config_reloads_total{result="fallback"}`)
 	}()
+	// Baseline the log count too: earlier tests against the same pod
+	// (the stage-4 fallback test) may already have produced the line,
+	// and waiting for the first occurrence would then synchronize on
+	// nothing.
+	logBaseline := 0
+	if logs, err := mckind.PodLogs(ctx, s.cs, s.ns, pod, "gateway", 500); err == nil {
+		logBaseline = strings.Count(logs, fallbackLogLine)
+	}
 
 	writeGatewayConfig(t, ctx, s, pod, "retur { this is not lua\n")
-	waitForLogOccurrences(t, ctx, s, pod, fallbackLogLine, 1)
+	waitForLogOccurrences(t, ctx, s, pod, fallbackLogLine, logBaseline+1)
 
 	waitForMetric(t, ctx, s, pod, gatewayMetricsPort,
 		`mcgateway_config_reloads_total{result="fallback"}`,

@@ -467,7 +467,13 @@ pub fn spawn_exporter(addr: &str, metrics: &'static Metrics) -> Result<SocketAdd
         .name("mcgw-metrics".into())
         .spawn(move || {
             for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
+                let Ok(mut stream) = stream else {
+                    // Accept errors can be persistent (EMFILE under fd
+                    // exhaustion): back off instead of spinning the
+                    // thread at 100% CPU inside the gateway process.
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                };
                 // Per-connection failures (client hangup, timeout) are
                 // the client's issue; the next scrape starts fresh.
                 let _ = serve_one(&mut stream, metrics);
@@ -477,14 +483,39 @@ pub fn spawn_exporter(addr: &str, metrics: &'static Metrics) -> Result<SocketAdd
     Ok(local)
 }
 
-/// Timeout guarding both halves of a scrape so a stalled client
-/// cannot wedge the (single-threaded) exporter.
+/// Budget for one whole scrape (read + write) so a stalled *or slow*
+/// client cannot wedge the (single-threaded) exporter: the deadline
+/// spans the connection, not each syscall — a client trickling one
+/// byte per read must not extend its welcome.
 const SCRAPE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn serve_one(stream: &mut TcpStream, metrics: &Metrics) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(SCRAPE_IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(SCRAPE_IO_TIMEOUT))?;
+    serve_one_until(stream, metrics, Instant::now() + SCRAPE_IO_TIMEOUT)
+}
 
+fn deadline_expired() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, "scrape exceeded deadline")
+}
+
+/// Arm the socket timeout with whatever budget remains, erroring once
+/// it is spent. `set_read_timeout`/`set_write_timeout` reject a zero
+/// Duration, so the zero check doubles as their precondition.
+fn remaining_budget(deadline: Instant) -> std::io::Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(deadline_expired());
+    }
+    Ok(remaining)
+}
+
+/// Deadline-injected form of [`serve_one`]; public as a test seam (the
+/// slow-client test would otherwise take the full production timeout).
+#[doc(hidden)]
+pub fn serve_one_until(
+    stream: &mut TcpStream,
+    metrics: &Metrics,
+    deadline: Instant,
+) -> std::io::Result<()> {
     // Read until end-of-headers or 4 KiB, whichever first. Only the
     // request line matters; the rest is drained so well-behaved
     // clients don't see a reset before the response.
@@ -494,6 +525,7 @@ fn serve_one(stream: &mut TcpStream, metrics: &Metrics) -> std::io::Result<()> {
         if n == buf.len() {
             break;
         }
+        stream.set_read_timeout(Some(remaining_budget(deadline)?))?;
         let read = stream.read(&mut buf[n..])?;
         if read == 0 {
             break;
@@ -540,6 +572,29 @@ fn serve_one(stream: &mut TcpStream, metrics: &Metrics) -> std::io::Result<()> {
     )
     .expect("writing to String is infallible");
     response.push_str(&body);
-    stream.write_all(response.as_bytes())?;
+    write_all_until(stream, response.as_bytes(), deadline)?;
     stream.flush()
+}
+
+/// `write_all` under the connection deadline. A per-syscall write
+/// timeout is not enough: a receiver draining one byte at a time makes
+/// each write "succeed" with minimal progress, turning a bounded body
+/// into an unbounded stay.
+fn write_all_until(
+    stream: &mut TcpStream,
+    mut buf: &[u8],
+    deadline: Instant,
+) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        stream.set_write_timeout(Some(remaining_budget(deadline)?))?;
+        let written = stream.write(buf)?;
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "connection closed mid-response",
+            ));
+        }
+        buf = &buf[written..];
+    }
+    Ok(())
 }
