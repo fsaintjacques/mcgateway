@@ -2,17 +2,26 @@
 //! `mcgateway_native`.
 //!
 //! Loaded via `require("mcgateway_native")` inside the memcached proxy's
-//! embedded Lua 5.4. Exposes four functions:
+//! embedded Lua 5.4. Exposes:
 //!
-//! - `merge(name, entries)` — run the named merge over the entry list;
-//!   returns the 1-based index of the winning entry, a string of
-//!   synthesized bytes, or `nil` for miss.
+//! - `merge(name, entries, opts?)` — run the named merge over the
+//!   entry list; returns the 1-based index of the winning entry, a
+//!   string of synthesized bytes, or `nil` for miss. The optional
+//!   `opts` table (`prefix`, `start`) attributes the call to a
+//!   keyspace for metrics — the read path's whole instrumentation
+//!   rides this existing crossing.
 //! - `has_merge(name)` — boolean; used by config validation.
 //! - `required_flags(name)` — single-character meta flags the merge
 //!   needs returned on reads (e.g. `"t"` for `last-write-wins`).
 //! - `names()` — list of registered merge names, lexicographically
 //!   sorted. Covers both native built-ins and WASM modules loaded from
 //!   the UDF directory.
+//! - `now()` — monotonic nanoseconds, the clock for `opts.start` /
+//!   `observe(start)`.
+//! - `observe(prefix, op, outcome, start?)` — record a request that
+//!   doesn't pass through `merge` (writes, sentinel routes).
+//! - `observe_reload(result, n_pools, n_keyspaces)` — record a config
+//!   load outcome (`ok` | `fallback`) and the serving config's shape.
 //!
 //! Native merges are resolved against
 //! [`mcgateway_core::Registry`] at module init. WASM merges are
@@ -31,6 +40,7 @@ mod watcher;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use mcgateway_core::{Entry, MergeResult, Registry, Status};
 use mcgateway_wasm_host::WasmHost;
@@ -149,6 +159,58 @@ fn build_registries() -> LuaResult<Arc<Registries>> {
         .map_err(LuaError::RuntimeError)
 }
 
+/// Origin for the monotonic clock `mcgw_native.now()` exposes.
+/// Process-wide so timestamps taken in one Lua VM compare against
+/// `now()` read in the dispatch path regardless of which VM armed it.
+fn clock_origin() -> Instant {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    *ORIGIN.get_or_init(Instant::now)
+}
+
+fn now_nanos() -> i64 {
+    i64::try_from(clock_origin().elapsed().as_nanos()).unwrap_or(i64::MAX)
+}
+
+#[allow(clippy::cast_precision_loss)] // sub-second values; f64 is exact enough
+fn micros_to_seconds(us: i64) -> f64 {
+    us as f64 / 1_000_000.0
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn nanos_to_seconds(ns: i64) -> f64 {
+    ns as f64 / 1_000_000_000.0
+}
+
+fn status_label(s: Status) -> &'static str {
+    match s {
+        Status::Hit => "hit",
+        Status::Miss => "miss",
+        Status::Error => "error",
+    }
+}
+
+/// Map caller-supplied label strings onto the closed label sets. The
+/// fallthrough keeps request-derived or future values from minting
+/// new label values — the cardinality contract.
+fn op_label(s: &str) -> &'static str {
+    match s {
+        "read" => "read",
+        "write" => "write",
+        _ => "other",
+    }
+}
+
+fn outcome_label(s: &str) -> &'static str {
+    match s {
+        "hit" => "hit",
+        "miss" => "miss",
+        "error" => "error",
+        "stored" => "stored",
+        "negative" => "negative",
+        _ => "other",
+    }
+}
+
 fn parse_status(s: &[u8]) -> LuaResult<Status> {
     match s {
         b"hit" => Ok(Status::Hit),
@@ -175,6 +237,10 @@ struct OwnedEntry {
     t: Option<i64>,
     value: Option<Vec<u8>>,
     line: Option<Vec<u8>>,
+    /// Backend elapsed time in microseconds (memcached's
+    /// `res:elapsed()`), captured for metrics only — it is not part
+    /// of the merge ABI and never reaches the `Entry` views.
+    elapsed: Option<i64>,
 }
 
 fn project(entries: &LuaTable) -> LuaResult<Vec<OwnedEntry>> {
@@ -188,6 +254,7 @@ fn project(entries: &LuaTable) -> LuaResult<Vec<OwnedEntry>> {
         let t: Option<i64> = e.get("t")?;
         let value: Option<LuaString> = e.get("value")?;
         let line: Option<LuaString> = e.get("line")?;
+        let elapsed: Option<i64> = e.get("elapsed")?;
         out.push(OwnedEntry {
             key: key.as_bytes().to_vec(),
             pool: pool.to_str()?.to_string(),
@@ -195,6 +262,7 @@ fn project(entries: &LuaTable) -> LuaResult<Vec<OwnedEntry>> {
             t,
             value: value.map(|s| s.as_bytes().to_vec()),
             line: line.map(|s| s.as_bytes().to_vec()),
+            elapsed,
         });
     }
     Ok(out)
@@ -214,6 +282,55 @@ fn as_views(owned: &[OwnedEntry]) -> Vec<Entry<'_>> {
         .collect()
 }
 
+/// Record everything the read path exposes, from inside the merge
+/// dispatch — the crossing already sees per-pool statuses and elapsed
+/// times on the entries, the merge body was just timed, and `opts`
+/// carries the keyspace attribution. One FFI crossing, all the read
+/// metrics.
+fn observe_read_dispatch(
+    merge_name: &str,
+    merge_seconds: f64,
+    owned: &[OwnedEntry],
+    result: &MergeResult,
+    opts: Option<&LuaTable>,
+) -> LuaResult<()> {
+    let m = metrics::global();
+    m.observe_merge_duration(merge_name, merge_seconds);
+    for e in owned {
+        m.observe_backend(
+            &e.pool,
+            status_label(e.status),
+            e.elapsed.map(micros_to_seconds),
+        );
+    }
+    let Some(opts) = opts else { return Ok(()) };
+    let prefix: Option<LuaString> = opts.get("prefix")?;
+    let start: Option<i64> = opts.get("start")?;
+    if let Some(prefix) = prefix {
+        // Mirrors routes.lua's reply selection: a merge decision is a
+        // hit; no decision is a miss when any backend missed, an
+        // error only when every backend failed.
+        let outcome = match result {
+            MergeResult::Winner(_) | MergeResult::Synthesized(_) => "hit",
+            MergeResult::Miss => {
+                if owned.iter().any(|e| e.status == Status::Miss) {
+                    "miss"
+                } else {
+                    "error"
+                }
+            }
+        };
+        let duration = start.map(|s| nanos_to_seconds(now_nanos().saturating_sub(s).max(0)));
+        m.observe_request(
+            &String::from_utf8_lossy(&prefix.as_bytes()),
+            "read",
+            outcome,
+            duration,
+        );
+    }
+    Ok(())
+}
+
 fn name_str(name: &LuaString) -> LuaResult<String> {
     let bytes = name.as_bytes();
     std::str::from_utf8(&bytes)
@@ -229,26 +346,75 @@ fn mcgateway_native(lua: &Lua) -> LuaResult<LuaTable> {
 
     {
         let registries = registries.clone();
-        let merge = lua.create_function(move |lua, (name, entries): (LuaString, LuaTable)| {
-            let name = name_str(&name)?;
-            let owned = project(&entries)?;
-            let view = as_views(&owned);
-            let result = registries.apply(&name, &view).ok_or_else(|| {
-                LuaError::RuntimeError(format!("mcgateway_native: unknown merge {name:?}"))
-            })?;
-            match result {
-                MergeResult::Winner(i) => Ok(LuaValue::Integer(
-                    i64::try_from(i + 1).map_err(|_| {
-                        LuaError::RuntimeError("merge winner index overflow".into())
-                    })?,
-                )),
-                MergeResult::Synthesized(bytes) => {
-                    Ok(LuaValue::String(lua.create_string(&bytes)?))
+        let merge = lua.create_function(
+            move |lua, (name, entries, opts): (LuaString, LuaTable, Option<LuaTable>)| {
+                let name = name_str(&name)?;
+                let owned = project(&entries)?;
+                let view = as_views(&owned);
+                let merge_started = Instant::now();
+                let result = registries.apply(&name, &view).ok_or_else(|| {
+                    LuaError::RuntimeError(format!("mcgateway_native: unknown merge {name:?}"))
+                })?;
+
+                observe_read_dispatch(
+                    &name,
+                    merge_started.elapsed().as_secs_f64(),
+                    &owned,
+                    &result,
+                    opts.as_ref(),
+                )?;
+
+                match result {
+                    MergeResult::Winner(i) => Ok(LuaValue::Integer(
+                        i64::try_from(i + 1).map_err(|_| {
+                            LuaError::RuntimeError("merge winner index overflow".into())
+                        })?,
+                    )),
+                    MergeResult::Synthesized(bytes) => {
+                        Ok(LuaValue::String(lua.create_string(&bytes)?))
+                    }
+                    MergeResult::Miss => Ok(LuaValue::Nil),
                 }
-                MergeResult::Miss => Ok(LuaValue::Nil),
-            }
-        })?;
+            },
+        )?;
         exports.set("merge", merge)?;
+    }
+
+    {
+        let now = lua.create_function(|_, _: Variadic<LuaValue>| Ok(now_nanos()))?;
+        exports.set("now", now)?;
+    }
+
+    {
+        let observe = lua.create_function(
+            |_, (prefix, op, outcome, start): (LuaString, LuaString, LuaString, Option<i64>)| {
+                let duration =
+                    start.map(|s| nanos_to_seconds(now_nanos().saturating_sub(s).max(0)));
+                metrics::global().observe_request(
+                    &String::from_utf8_lossy(&prefix.as_bytes()),
+                    op_label(&String::from_utf8_lossy(&op.as_bytes())),
+                    outcome_label(&String::from_utf8_lossy(&outcome.as_bytes())),
+                    duration,
+                );
+                Ok(())
+            },
+        )?;
+        exports.set("observe", observe)?;
+    }
+
+    {
+        let observe_reload = lua.create_function(
+            |_, (result, pools, keyspaces): (LuaString, usize, usize)| {
+                let result = match &*String::from_utf8_lossy(&result.as_bytes()) {
+                    "ok" => "ok",
+                    "fallback" => "fallback",
+                    _ => "other",
+                };
+                metrics::global().config_reload(result, pools, keyspaces);
+                Ok(())
+            },
+        )?;
+        exports.set("observe_reload", observe_reload)?;
     }
 
     {

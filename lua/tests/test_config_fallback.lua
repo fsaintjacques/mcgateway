@@ -15,9 +15,14 @@ local KNOWN_FLAGS = {
     ["last-write-wins"] = "t",
     ["pool-preferred"] = "",
 }
+-- observe_reload records its calls so the tests can assert the reload
+-- outcomes load_config reports; setting `reload_observer_errors` makes
+-- it throw, to prove metrics failures cannot break the fallback.
+local reload_calls = {}
+local reload_observer_errors = false
 package.preload["mcgateway_native"] = function()
     return {
-        merge = function(_name, _entries) return nil end,
+        merge = function(_name, _entries, _opts) return nil end,
         has_merge = function(name) return KNOWN_FLAGS[name] ~= nil end,
         required_flags = function(name)
             local f = KNOWN_FLAGS[name]
@@ -27,6 +32,16 @@ package.preload["mcgateway_native"] = function()
             return f
         end,
         names = function() return { "first-hit", "last-write-wins", "pool-preferred" } end,
+        now = function() return 0 end,
+        observe = function(_prefix, _op, _outcome, _start) end,
+        observe_reload = function(result, n_pools, n_keyspaces)
+            if reload_observer_errors then
+                error("metrics are broken today")
+            end
+            reload_calls[#reload_calls + 1] = {
+                result = result, pools = n_pools, keyspaces = n_keyspaces,
+            }
+        end,
     }
 end
 
@@ -103,11 +118,17 @@ local cfg1 = gw.load_config(path)
 check(cfg1.pools[1].name == "mc-a", "good load returns config")
 check(cfg1.keyspaces[1].required_flags == "",
     "default merge's required_flags resolved onto snapshot")
+check(#reload_calls == 1 and reload_calls[1].result == "ok"
+    and reload_calls[1].pools == 1 and reload_calls[1].keyspaces == 1,
+    "good load observed as ok with config shape")
 
 -- Failing reloads (syntax, validation, unknown merge) fall back to
 -- the last good.
 write(BAD_SYNTAX)
 check(gw.load_config(path) == cfg1, "syntax-error reload keeps last good")
+check(#reload_calls == 2 and reload_calls[2].result == "fallback"
+    and reload_calls[2].pools == 1,
+    "fallback observed with the serving (last good) config shape")
 write(BAD_SEMANTIC)
 check(gw.load_config(path) == cfg1, "validation-error reload keeps last good")
 write(UNKNOWN_MERGE)
@@ -121,6 +142,17 @@ check(cfg2.keyspaces[1].required_flags == "t",
     "named merge's required_flags resolved onto snapshot")
 write(BAD_SYNTAX)
 check(gw.load_config(path) == cfg2, "fallback tracks the newest good config")
+
+-- Metrics must never re-couple survival to the native module: a
+-- throwing observer changes nothing about load_config's behaviour.
+reload_observer_errors = true
+write(GOOD)
+check(gw.load_config(path).pools[1].name == "mc-a",
+    "good load survives a throwing reload observer")
+write(BAD_SYNTAX)
+check(gw.load_config(path).pools[1].name == "mc-a",
+    "fallback survives a throwing reload observer")
+reload_observer_errors = false
 
 os.remove(path)
 if failed > 0 then os.exit(1) end

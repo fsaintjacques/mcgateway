@@ -40,6 +40,7 @@ do
         line=function() return "VA 3" end,
         vlen=function() return 0 end,
         raw_string=function() return nil end,
+        elapsed=function() return 250 end,
         _tag=tag,
     } end
     local pools = { "a", "b" }
@@ -48,6 +49,18 @@ do
     check(#es == 2, "build yields one entry per pool")
     check(es[1].key == "user:1" and es[1].pool == "a", "build [1] = (key, a)")
     check(es[2].key == "user:1" and es[2].pool == "b", "build [2] = (key, b)")
+    check(es[1].elapsed == 250, "backend elapsed captured on the entry")
+end
+
+-- Responses without an elapsed method (fakes, older proxies) must not
+-- fail the request; the field just stays nil.
+do
+    local bare = {
+        ok=function() return true end, hit=function() return false end,
+    }
+    local e = entries.make("user:1", "a", bare)
+    check(e.status == "miss" and e.elapsed == nil,
+          "missing elapsed method degrades to nil")
 end
 
 -- build with nil result cells (per-pool error) ----------------------------

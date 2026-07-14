@@ -9,10 +9,13 @@ package.path = "?.lua;?/init.lua;" .. package.path
 -- can `require` it without the real cdylib being on cpath.
 package.preload["mcgateway_native"] = function()
     return {
-        merge = function(_name, _entries) return nil end,
+        merge = function(_name, _entries, _opts) return nil end,
         has_merge = function(_name) return true end,
         required_flags = function(_name) return "" end,
         names = function() return { "first-hit", "last-write-wins", "pool-preferred" } end,
+        now = function() return 0 end,
+        observe = function(_prefix, _op, _outcome, _start) end,
+        observe_reload = function(_result, _pools, _keyspaces) end,
     }
 end
 
