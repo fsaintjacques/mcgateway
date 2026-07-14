@@ -23,6 +23,8 @@
 //! crosses the boundary on the Lua → Rust side; the Rust → WASM wire
 //! format is owned entirely by [`mcgateway_wasm_host`].
 
+mod logging;
+mod metrics;
 mod registries;
 mod udf_loader;
 mod watcher;
@@ -53,18 +55,37 @@ pub const CONFIG_ENV: &str = "MCGATEWAY_CONFIG";
 static SHARED: OnceLock<Result<Arc<Registries>, String>> = OnceLock::new();
 
 fn rescan_into(host: &WasmHost, registries: &Arc<Registries>, dir: &Path) -> Result<(), String> {
-    let table = udf_loader::scan_dir(host, registries, dir, |path, msg| {
-        // stderr-log for now; structured logging lands with Stage 6.
-        eprintln!("mcgateway_native: udf {} skipped: {msg}", path.display());
+    let m = metrics::global();
+    let table = udf_loader::scan_dir(host, registries, dir, |path, problem, msg| {
+        m.udf_module_failure(problem.as_str());
+        log::warn!("udf {} skipped ({}): {msg}", path.display(), problem.as_str());
     })
-    .map_err(|e| format!("scan {}: {e}", dir.display()))?;
+    .map_err(|e| {
+        m.udf_rescan("error");
+        format!("scan {}: {e}", dir.display())
+    })?;
+    m.set_registry_merges("wasm", table.len());
+    m.udf_rescan("ok");
     registries.swap_wasm(table);
     Ok(())
 }
 
 fn init_shared() -> Result<Arc<Registries>, String> {
+    logging::init();
+
+    // Metrics exposition arms first and independently: bind failure
+    // is loud but non-fatal — a gateway that cannot expose metrics
+    // must still serve traffic.
+    if let Ok(addr) = std::env::var(metrics::METRICS_ADDR_ENV) {
+        match metrics::spawn_exporter(&addr, metrics::global()) {
+            Ok(bound) => log::info!("metrics exposition listening on {bound}"),
+            Err(e) => log::error!("metrics exposition disabled: {e}"),
+        }
+    }
+
     let mut builtins = Registry::new();
     mcgateway_core::builtins::register(&mut builtins);
+    metrics::global().set_registry_merges("builtin", builtins.names().count());
     let registries = Arc::new(Registries::new(builtins));
 
     // Discover WASM modules on disk. Failure to read the directory —
@@ -94,7 +115,7 @@ fn init_shared() -> Result<Arc<Registries>, String> {
                 let (host, registries, dir) = (host.clone(), registries.clone(), dir.clone());
                 Box::new(move || {
                     if let Err(e) = rescan_into(&host, &registries, &dir) {
-                        eprintln!("mcgateway_native: udf rescan failed (keeping previous table): {e}");
+                        log::error!("udf rescan failed (keeping previous table): {e}");
                     }
                 })
             }
@@ -103,15 +124,19 @@ fn init_shared() -> Result<Arc<Registries>, String> {
         watcher::spawn(
             watcher::Plan::new(PathBuf::from(&config_path), dir),
             rescan,
-            || {
-                eprintln!("mcgateway_native: change detected; requesting proxy reload (SIGHUP)");
+            |trigger| {
+                metrics::global().reload_signal(trigger.as_str());
+                log::info!(
+                    "change detected ({}); requesting proxy reload (SIGHUP)",
+                    trigger.as_str(),
+                );
                 unsafe {
                     libc::kill(libc::getpid(), libc::SIGHUP);
                 }
             },
         )
         .map_err(|e| format!("mcgateway_native: watcher: {e}"))?;
-        eprintln!("mcgateway_native: live reload armed for {config_path}");
+        log::info!("live reload armed for {config_path}");
     }
 
     Ok(registries)

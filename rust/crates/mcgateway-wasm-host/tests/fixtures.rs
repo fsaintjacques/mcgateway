@@ -200,3 +200,39 @@ fn empty_entries_still_round_trip() {
     let result = run(host.engine(), &module, &entries).unwrap();
     assert!(matches!(result, MergeResult::Miss));
 }
+
+#[test]
+fn merge_error_kinds_classify_correctly() {
+    use mcgateway_wasm_host::MergeErrorKind;
+
+    let host = WasmHost::new().unwrap();
+    let owned = sample_entries();
+    let entries = views(&owned);
+
+    // Trap: the guest hits `unreachable`.
+    let module = host.compile(&load("trap.wat")).unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "t").unwrap();
+    let err = merge.run(&entries).unwrap_err();
+    assert_eq!(MergeErrorKind::classify(&err), MergeErrorKind::Trap);
+    assert_eq!(MergeErrorKind::classify(&err).as_str(), "trap");
+
+    // Guest: the module itself reports failure (result tag 0xFF).
+    let module = host.compile(&load("guest_error.wat")).unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "g").unwrap();
+    let err = merge.run(&entries).unwrap_err();
+    assert_eq!(MergeErrorKind::classify(&err), MergeErrorKind::Guest);
+
+    // Host: protocol violation decoded host-side (winner index out of
+    // range) — blames neither the budget nor a trap.
+    let module = host.compile(&load("winner_out_of_range.wat")).unwrap();
+    let merge = WasmMerge::from_module(&host, &module, "w").unwrap();
+    let err = merge.run(&entries).unwrap_err();
+    assert_eq!(MergeErrorKind::classify(&err), MergeErrorKind::Host);
+
+    // Deadline: epoch interruption fires mid-loop.
+    let module = host.compile(&load("infinite_loop.wat")).unwrap();
+    let mut merge = WasmMerge::from_module(&host, &module, "d").unwrap();
+    merge.set_deadline_ticks(3);
+    let err = merge.run(&entries).unwrap_err();
+    assert_eq!(MergeErrorKind::classify(&err), MergeErrorKind::Deadline);
+}

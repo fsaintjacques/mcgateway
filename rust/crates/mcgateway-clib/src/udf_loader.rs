@@ -1,19 +1,44 @@
 //! Loads `.wasm` merge UDFs from a directory and publishes them into a
 //! [`Registries`]'s WASM table.
 //!
-//! Scope for step 3: startup scan only. Hot-reload via `notify` lands
-//! in a follow-up once the kind tests need it. This file exists now so
-//! the step 3 boundary is right-shaped for the watcher to drop in
-//! without re-threading ownership.
+//! Owns the scan only: hot-reload triggering lives in `watcher`, and
+//! `lib.rs` wires the two together (rescan on UDF-directory change,
+//! then swap). Loaded modules enter the table wrapped in
+//! [`ObservedMerge`] so their failures are observable.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mcgateway_core::Merge;
-use mcgateway_wasm_host::{WasmHost, WasmMerge};
+use mcgateway_core::{Entry, Merge, MergeResult};
+use mcgateway_wasm_host::{MergeErrorKind, WasmHost, WasmMerge};
 
 use crate::registries::{Registries, WasmEntry, WasmTable};
+
+/// Why a module was skipped during a scan. Coarse by design: these
+/// become metric label values, so the set must stay closed — the
+/// human-readable detail rides in the message alongside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UdfProblem {
+    /// The module path has no UTF-8 stem to derive a name from.
+    InvalidName,
+    /// The name collides with a built-in merge; the built-in wins.
+    BuiltinCollision,
+    /// The module failed to read, compile, or instantiate.
+    LoadFailed,
+}
+
+impl UdfProblem {
+    /// Stable lowercase form, used as a metric label value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidName => "invalid-name",
+            Self::BuiltinCollision => "builtin-collision",
+            Self::LoadFailed => "load-failed",
+        }
+    }
+}
 
 /// Environment variable overriding the default UDF directory.
 pub const UDF_DIR_ENV: &str = "MCGW_UDF_DIR";
@@ -56,7 +81,7 @@ pub fn scan_dir(
     host: &WasmHost,
     registries: &Registries,
     dir: &Path,
-    mut on_problem: impl FnMut(&Path, &str),
+    mut on_problem: impl FnMut(&Path, UdfProblem, &str),
 ) -> std::io::Result<WasmTable> {
     let mut out = WasmTable::new();
     for entry in fs::read_dir(dir)? {
@@ -66,12 +91,17 @@ pub fn scan_dir(
             continue;
         }
         let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
-            on_problem(&path, "module path has no utf-8 stem");
+            on_problem(
+                &path,
+                UdfProblem::InvalidName,
+                "module path has no utf-8 stem",
+            );
             continue;
         };
         if registries.builtins().has(&name) {
             on_problem(
                 &path,
+                UdfProblem::BuiltinCollision,
                 "name collides with a built-in merge; disk module ignored",
             );
             continue;
@@ -81,7 +111,7 @@ pub fn scan_dir(
             Ok(entry) => {
                 out.insert(name, Arc::new(entry));
             }
-            Err(err) => on_problem(&path, &err),
+            Err(err) => on_problem(&path, UdfProblem::LoadFailed, &err),
         }
     }
     Ok(out)
@@ -94,7 +124,41 @@ fn load_module(host: &WasmHost, path: &Path, name: &str) -> Result<WasmEntry, St
         .map_err(|e| format!("instantiate: {e:#}"))?;
     let required_flags = merge.required_flags().to_owned();
     Ok(WasmEntry {
-        merge: Arc::new(merge) as Arc<dyn Merge>,
+        merge: Arc::new(ObservedMerge { inner: merge }) as Arc<dyn Merge>,
         required_flags,
     })
+}
+
+/// What actually enters the registry: a [`WasmMerge`] wrapped so
+/// dispatch failures are counted and (rate-limited) logged before
+/// degrading to `Miss`. The wrapper — not `WasmMerge`'s own `Merge`
+/// impl — carries the observation, so the host crate stays
+/// metrics-free and classification runs on the un-wrapped error,
+/// where downcasting still works. Dispatch behaviour is byte-
+/// identical to the bare impl: same inputs, same `Miss`.
+struct ObservedMerge {
+    inner: WasmMerge,
+}
+
+impl Merge for ObservedMerge {
+    fn apply(&self, entries: &[Entry<'_>]) -> MergeResult {
+        match self.inner.run(entries) {
+            Ok(r) => r,
+            Err(e) => {
+                let kind = MergeErrorKind::classify(&e);
+                crate::metrics::global().merge_error(self.inner.name(), kind.as_str());
+                if crate::metrics::log_limiter().try_acquire() {
+                    log::warn!(
+                        "merge {name} failed ({kind}), degrading to miss: {e:#}",
+                        name = self.inner.name(),
+                        kind = kind.as_str(),
+                    );
+                }
+                MergeResult::Miss
+            }
+        }
+    }
+    // required_flags stays the trait default (""): the registry reads
+    // flags from WasmEntry.required_flags, captured above from the
+    // inherent String-backed accessor — same shim story as WasmMerge.
 }
