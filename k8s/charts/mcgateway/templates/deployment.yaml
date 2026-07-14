@@ -15,11 +15,21 @@ spec:
       labels:
         {{- include "mcgateway.labels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
-      {{- if not .Values.operator.enabled }}
+      {{- if or (not .Values.operator.enabled) .Values.metrics.enabled }}
       annotations:
+        {{- if not .Values.operator.enabled }}
         # Force pod restart when config changes. Meaningless in
         # operator mode, where config arrives via CRs at runtime.
         checksum/config: {{ .Values.config | sha256sum }}
+        {{- end }}
+        {{- if .Values.metrics.enabled }}
+        # Annotation-based scrape convention; points at the gateway
+        # exposition. The operator port (operator mode) is covered by
+        # the ServiceMonitor, which handles multiple endpoints.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metrics.port | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
       {{- end }}
     spec:
       {{- if .Values.operator.enabled }}
@@ -41,6 +51,13 @@ spec:
           restartPolicy: Always
           args:
             - --dir=/var/run/mcgateway
+            - --metrics-addr={{ if .Values.metrics.enabled }}:{{ .Values.metrics.operatorPort }}{{ else }}0{{ end }}
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - name: op-metrics
+              containerPort: {{ .Values.metrics.operatorPort }}
+              protocol: TCP
+          {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -95,6 +112,11 @@ spec:
             - name: memcache
               containerPort: {{ .Values.gateway.port }}
               protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: memcache
@@ -106,12 +128,20 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
-          {{- if or .Values.operator.enabled .Values.gateway.liveReload }}
+          {{- if or .Values.operator.enabled .Values.gateway.liveReload .Values.metrics.enabled }}
           env:
+            {{- if or .Values.operator.enabled .Values.gateway.liveReload }}
             - name: MCGATEWAY_CONFIG
               value: /var/run/mcgateway/config.lua
             - name: MCGW_UDF_DIR
               value: /var/run/mcgateway/udf
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: MCGW_METRICS_ADDR
+              value: "0.0.0.0:{{ .Values.metrics.port }}"
+            {{- end }}
+          {{- end }}
+          {{- if or .Values.operator.enabled .Values.gateway.liveReload }}
           volumeMounts:
             # Kept read-write in v1 so fault-injection tests can write
             # config files directly (the fail-safe reload tests). The
@@ -171,3 +201,17 @@ spec:
       port: {{ .Values.gateway.port }}
       targetPort: memcache
       protocol: TCP
+    {{- if .Values.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+    {{- if .Values.operator.enabled }}
+    # Numeric targetPort: named-port resolution against a (native
+    # sidecar) initContainer is version-sensitive; the number is not.
+    - name: op-metrics
+      port: {{ .Values.metrics.operatorPort }}
+      targetPort: {{ .Values.metrics.operatorPort }}
+      protocol: TCP
+    {{- end }}
+    {{- end }}

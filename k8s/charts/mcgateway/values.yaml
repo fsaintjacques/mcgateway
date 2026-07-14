@@ -25,6 +25,21 @@ operator:
 pools: []
 keyspaces: []
 
+# Prometheus metrics (see doc/plans/stage-6-observability.md).
+# libmcgateway serves OpenMetrics text on `port` in every mode —
+# exposition depends only on the library, not on how config arrives.
+# In operator mode the operator additionally serves controller-runtime
+# metrics (plus render-warning/commit gauges) on `operatorPort`.
+# Pod annotations advertise the gateway port for annotation-based
+# scrapers; the ServiceMonitor (Prometheus operator CRDs required)
+# covers both ports.
+metrics:
+  enabled: true
+  port: 9151
+  operatorPort: 8080
+  serviceMonitor:
+    enabled: false
+
 gateway:
   replicas: 1
   port: 11211
