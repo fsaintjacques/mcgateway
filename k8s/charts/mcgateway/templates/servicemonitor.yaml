@@ -1,0 +1,22 @@
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+# Requires the Prometheus operator's CRDs (monitoring.coreos.com);
+# gated off by default so installs into clusters without them don't
+# fail. Annotation-based scraping (on by default via the pod
+# annotations) needs neither this object nor the CRDs.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mcgateway
+  labels:
+    {{- include "mcgateway.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "mcgateway.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: metrics
+    {{- if .Values.operator.enabled }}
+    - port: op-metrics
+    {{- end }}
+{{- end }}
