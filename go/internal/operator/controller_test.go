@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -119,6 +120,75 @@ func TestReconcileFailureLeavesNotReady(t *testing.T) {
 	}
 	if r.Ready() {
 		t.Fatal("ready after a failed commit")
+	}
+}
+
+// The render-warnings gauge is the alertable form of the blast-radius
+// policy: it must rise when a CR is skipped and — being a gauge set
+// from every render — fall back to zero once the CR is fixed.
+func TestReconcileSetsMetrics(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := &v1alpha1.Pool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mc-a", Namespace: "gw"},
+		Spec:       v1alpha1.PoolSpec{Addrs: []string{"mc-a:11211"}},
+	}
+	// References a pool that doesn't exist: skipped with a Warning.
+	bad := &v1alpha1.Keyspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: "gw"},
+		Spec: v1alpha1.KeyspaceSpec{
+			Prefix: "bad",
+			Read:   []string{"nope"},
+			Write:  []string{"nope"},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, bad).Build()
+	r := &Reconciler{Client: cl, FS: NewOSFS(t.TempDir()), Namespace: "gw"}
+	ctx := context.Background()
+
+	okBefore := testutil.ToFloat64(commitsTotal.WithLabelValues("ok"))
+
+	if _, err := r.Reconcile(ctx, reconcile.Request{}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := testutil.ToFloat64(renderWarnings); got != 1 {
+		t.Fatalf("render warnings gauge = %v, want 1 (bad keyspace skipped)", got)
+	}
+	if got := testutil.ToFloat64(snapshotObjects.WithLabelValues("pool")); got != 1 {
+		t.Fatalf("snapshot pool gauge = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(snapshotObjects.WithLabelValues("keyspace")); got != 1 {
+		t.Fatalf("snapshot keyspace gauge = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(commitsTotal.WithLabelValues("ok")); got != okBefore+1 {
+		t.Fatalf("ok commits = %v, want %v", got, okBefore+1)
+	}
+
+	// Fix the CR; the gauge must return to zero on the next render.
+	bad.Spec.Read = []string{"mc-a"}
+	bad.Spec.Write = []string{"mc-a"}
+	if err := cl.Update(ctx, bad); err != nil {
+		t.Fatalf("update keyspace: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, reconcile.Request{}); err != nil {
+		t.Fatalf("reconcile after fix: %v", err)
+	}
+	if got := testutil.ToFloat64(renderWarnings); got != 0 {
+		t.Fatalf("render warnings gauge = %v after fix, want 0", got)
+	}
+
+	// A failing commit counts under result="error".
+	errBefore := testutil.ToFloat64(commitsTotal.WithLabelValues("error"))
+	rFail := &Reconciler{Client: cl, FS: failingFS{NewOSFS(t.TempDir())}, Namespace: "gw"}
+	if _, err := rFail.Reconcile(ctx, reconcile.Request{}); err == nil {
+		t.Fatal("expected commit failure")
+	}
+	if got := testutil.ToFloat64(commitsTotal.WithLabelValues("error")); got != errBefore+1 {
+		t.Fatalf("error commits = %v, want %v", got, errBefore+1)
 	}
 }
 
