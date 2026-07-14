@@ -49,7 +49,13 @@ fn fixture_with(with_udf: bool, tune: impl FnOnce(&mut watcher::Plan)) -> Fixtur
     watcher::spawn(
         plan,
         move || tx2.send("rescan").unwrap(),
-        move || tx.send("reload").unwrap(),
+        move |trigger| {
+            tx.send(match trigger {
+                watcher::ReloadTrigger::Config => "reload-config",
+                watcher::ReloadTrigger::UdfSwap => "reload-udf",
+            })
+            .unwrap();
+        },
     )
     .unwrap();
 
@@ -76,7 +82,7 @@ fn rename_commit_triggers_reload() {
     fs::write(&staged, "return { pools = {} }").unwrap();
     fs::rename(&staged, &f.config).unwrap();
 
-    assert_eq!(f.rx.recv_timeout(WAIT), Ok("reload"));
+    assert_eq!(f.rx.recv_timeout(WAIT), Ok("reload-config"));
 }
 
 #[test]
@@ -86,7 +92,7 @@ fn in_place_write_triggers_reload() {
     // kubectl-cp-style write: same inode, no rename.
     fs::write(&f.config, "return { keyspaces = {} }").unwrap();
 
-    assert_eq!(f.rx.recv_timeout(WAIT), Ok("reload"));
+    assert_eq!(f.rx.recv_timeout(WAIT), Ok("reload-config"));
 }
 
 #[test]
@@ -98,7 +104,7 @@ fn wasm_drop_rescans_then_reloads() {
     // Same debounce batch: rescan strictly before the reload it
     // triggers, so config re-validation sees the fresh table.
     assert_eq!(f.rx.recv_timeout(WAIT), Ok("rescan"));
-    assert_eq!(f.rx.recv_timeout(WAIT), Ok("reload"));
+    assert_eq!(f.rx.recv_timeout(WAIT), Ok("reload-udf"));
 }
 
 #[test]
@@ -112,7 +118,7 @@ fn config_and_wasm_batch_coalesces_to_one_reload() {
     fs::write(&f.config, "return { pools = {} }").unwrap();
 
     assert_eq!(f.rx.recv_timeout(WAIT), Ok("rescan"));
-    assert_eq!(f.rx.recv_timeout(WAIT), Ok("reload"));
+    assert_eq!(f.rx.recv_timeout(WAIT), Ok("reload-udf"));
     // One batch, one reload: nothing else queued.
     assert_eq!(f.rx.recv_timeout(QUIET), Err(mpsc::RecvTimeoutError::Timeout));
 }
@@ -142,7 +148,7 @@ fn sustained_event_stream_cannot_defer_reload_past_batch_age() {
     let got = f.rx.recv_timeout(WAIT);
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     writer.join().unwrap();
-    assert_eq!(got, Ok("reload"));
+    assert_eq!(got, Ok("reload-config"));
 }
 
 #[test]

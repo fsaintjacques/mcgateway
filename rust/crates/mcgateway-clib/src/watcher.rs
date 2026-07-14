@@ -23,6 +23,31 @@ use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher};
 
+/// Why a reload is being requested. Carried out through the `reload`
+/// closure so the caller can label its metrics without this module
+/// depending on them (the watcher source is also compiled standalone
+/// by its integration tests).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReloadTrigger {
+    /// The batch touched only the config file.
+    Config,
+    /// The batch touched the UDF directory: the registry was
+    /// rescanned first and the reload re-validates the config against
+    /// the fresh table (the stage-4 race-closing re-raise).
+    UdfSwap,
+}
+
+impl ReloadTrigger {
+    /// Stable lowercase form, used as a metric label value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::UdfSwap => "udf-swap",
+        }
+    }
+}
+
 /// Quiet period after the last event before a batch is acted on.
 pub const DEBOUNCE: Duration = Duration::from_millis(200);
 
@@ -61,7 +86,7 @@ impl Plan {
 pub fn spawn(
     plan: Plan,
     rescan: impl Fn() + Send + 'static,
-    reload: impl Fn() + Send + 'static,
+    reload: impl Fn(ReloadTrigger) + Send + 'static,
 ) -> Result<(), String> {
     // Canonicalise both watch roots: event paths come back canonical
     // (macOS reports through /private, mounts may sit behind
@@ -166,7 +191,11 @@ pub fn spawn(
                     rescan();
                 }
                 if config_dirty || udf_dirty {
-                    reload();
+                    reload(if udf_dirty {
+                        ReloadTrigger::UdfSwap
+                    } else {
+                        ReloadTrigger::Config
+                    });
                 }
             }
         })

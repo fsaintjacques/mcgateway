@@ -22,6 +22,7 @@
 //! is intentionally unaware of the SDK so the boundary stays
 //! reviewable as wire format, not Rust types.
 
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -30,7 +31,7 @@ use std::time::Duration;
 use mcgateway_core::{Entry, Merge, MergeResult};
 use wasmtime::{
     Caller, Config, Engine, Error, Instance, InstancePre, Linker, Memory, Module, Result, Store,
-    TypedFunc,
+    Trap, TypedFunc,
 };
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
@@ -85,8 +86,9 @@ pub const TICK_INTERVAL_MS: u64 = 2;
 
 /// Maximum number of `mcgw_log` lines the host will emit per merge
 /// call. Exceeded lines are dropped silently so a runaway guest can't
-/// flood the gateway's stderr. Per-second rate limiting lands with
-/// Stage 6 structured logging.
+/// flood the gateway's stderr. Lines go through the `log` facade, so
+/// the embedding process's logger level filters below this cap;
+/// levels 0–1 (trace/debug) are free by default.
 pub const LOG_BUDGET_PER_CALL: u32 = 16;
 
 /// Maximum size of a single `mcgw_log` message. Guest-supplied `len`
@@ -110,6 +112,73 @@ pub const MAX_GUEST_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 macro_rules! werr {
     ($($arg:tt)*) => { Error::msg(format!($($arg)*)) };
 }
+
+/// Classification of a failed merge call, for metrics. The variants
+/// are deliberately coarse: they answer "who do I blame" (the budget,
+/// the module, the module's own logic, or the host machinery), not
+/// "what exactly happened" — the error message carries the detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeErrorKind {
+    /// The call exceeded its deadline and was interrupted.
+    Deadline,
+    /// The guest trapped: unreachable, out-of-bounds access, stack
+    /// overflow, memory growth beyond the cap.
+    Trap,
+    /// The guest ran to completion and reported an error itself
+    /// (result tag `0xFF`).
+    Guest,
+    /// Everything host-side: a malformed result descriptor, an
+    /// oversized synthesized payload, instantiation failure (e.g.
+    /// pooling-allocator exhaustion), or memory I/O errors.
+    Host,
+}
+
+impl MergeErrorKind {
+    /// Classify an error returned by [`WasmMerge::run`]. Works on the
+    /// error as returned — classification downcasts, so callers must
+    /// not re-wrap the error before classifying it.
+    #[must_use]
+    pub fn classify(err: &Error) -> Self {
+        if let Some(trap) = err.downcast_ref::<Trap>() {
+            if *trap == Trap::Interrupt {
+                return Self::Deadline;
+            }
+            return Self::Trap;
+        }
+        if err.downcast_ref::<GuestError>().is_some() {
+            return Self::Guest;
+        }
+        Self::Host
+    }
+
+    /// Stable lowercase form, used as a metric label value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deadline => "deadline",
+            Self::Trap => "trap",
+            Self::Guest => "guest",
+            Self::Host => "host",
+        }
+    }
+}
+
+/// Marker error for result tag `0xFF`: the guest itself reported
+/// failure. A typed error (rather than a formatted string) so
+/// [`MergeErrorKind::classify`] can tell "the module's logic said no"
+/// apart from host-side protocol violations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestError {
+    pub code: u8,
+}
+
+impl fmt::Display for GuestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "guest returned error code {}", self.code)
+    }
+}
+
+impl std::error::Error for GuestError {}
 
 /// Per-call state the store carries. Holds the WASI preview1 context
 /// (empty; see [`new_wasi_ctx`]) alongside bookkeeping the `mcgw_log`
@@ -267,17 +336,20 @@ fn build_linker(engine: &Engine) -> Result<Linker<MergeStoreData>> {
                 return;
             }
             state.log_budget_remaining -= 1;
-            let level_label = match level {
-                0 => "TRACE",
-                1 => "DEBUG",
-                2 => "INFO",
-                3 => "WARN",
-                4 => "ERROR",
-                _ => "?",
+            // Unknown levels clamp to error rather than being dropped:
+            // a guest built against a future level table still gets
+            // its message out.
+            let log_level = match level {
+                0 => log::Level::Trace,
+                1 => log::Level::Debug,
+                2 => log::Level::Info,
+                3 => log::Level::Warn,
+                _ => log::Level::Error,
             };
             let msg = String::from_utf8_lossy(&buf);
-            eprintln!(
-                "mcgw.log [{level_label}] {module}: {msg}",
+            log::log!(
+                log_level,
+                "mcgw.log {module}: {msg}",
                 module = state.module_name,
             );
         },
@@ -678,7 +750,7 @@ fn decode_result(
         }
         RESULT_TAG_GUEST_ERROR => {
             let code = ((packed >> 8) & 0xFF) as u8;
-            Err(werr!("guest returned error code {code}"))
+            Err(Error::new(GuestError { code }))
         }
         other => Err(werr!("guest returned unknown result tag {other}")),
     }

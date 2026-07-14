@@ -17,6 +17,8 @@ mlua = { version = "0.10", features = ["lua54", "module"] }
 arc-swap = "1"
 libc = "0.2"
 notify = "8"
+prometheus-client = "0.25.0"
+log = "0.4.33"
 
 [dev-dependencies]
 tempfile = "3"

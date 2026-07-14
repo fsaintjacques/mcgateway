@@ -11,7 +11,12 @@ use mcgateway_wasm_host::WasmHost;
 // the integration test exercises their Rust surface (not the Lua
 // bindings) by including the sources via `#[path]`. This keeps the
 // crate's public API Lua-only without duplicating the loader logic in
-// a separate library crate.
+// a separate library crate. `metrics` rides along because udf_loader
+// references it as `crate::metrics` (the ObservedMerge wrapper), and
+// `crate::` resolves against this test crate's root.
+#[path = "../src/metrics.rs"]
+#[allow(dead_code)]
+mod metrics;
 #[path = "../src/registries.rs"]
 #[allow(dead_code)]
 mod registries;
@@ -20,6 +25,7 @@ mod registries;
 mod udf_loader;
 
 use registries::Registries;
+use udf_loader::UdfProblem;
 
 fn mk_valid_wasm() -> Vec<u8> {
     let wat = r#"(module
@@ -65,9 +71,9 @@ fn valid_module_is_registered() {
 
     let registries = build_registries_with_builtins();
     let host = WasmHost::new().unwrap();
-    let mut problems: Vec<String> = Vec::new();
-    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |p, m| {
-        problems.push(format!("{}: {m}", p.display()));
+    let mut problems: Vec<(UdfProblem, String)> = Vec::new();
+    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |p, kind, m| {
+        problems.push((kind, format!("{}: {m}", p.display())));
     })
     .unwrap();
 
@@ -88,16 +94,18 @@ fn builtin_name_collision_is_skipped() {
 
     let registries = build_registries_with_builtins();
     let host = WasmHost::new().unwrap();
-    let mut problems: Vec<String> = Vec::new();
-    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |p, m| {
-        problems.push(format!("{}: {m}", p.display()));
+    let mut problems: Vec<(UdfProblem, String)> = Vec::new();
+    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |p, kind, m| {
+        problems.push((kind, format!("{}: {m}", p.display())));
     })
     .unwrap();
     registries.swap_wasm(table);
 
     assert!(
-        problems.iter().any(|s| s.contains("first-hit.wasm") && s.contains("built-in")),
-        "expected collision log, got: {problems:?}"
+        problems
+            .iter()
+            .any(|(k, s)| *k == UdfProblem::BuiltinCollision && s.contains("first-hit.wasm")),
+        "expected collision problem, got: {problems:?}"
     );
     // Custom module still registered:
     assert!(registries.has("custom"));
@@ -114,16 +122,18 @@ fn bad_module_is_skipped_and_others_still_load() {
 
     let registries = build_registries_with_builtins();
     let host = WasmHost::new().unwrap();
-    let mut problems: Vec<String> = Vec::new();
-    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |p, m| {
-        problems.push(format!("{}: {m}", p.display()));
+    let mut problems: Vec<(UdfProblem, String)> = Vec::new();
+    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |p, kind, m| {
+        problems.push((kind, format!("{}: {m}", p.display())));
     })
     .unwrap();
     registries.swap_wasm(table);
 
     assert!(
-        problems.iter().any(|s| s.contains("bad.wasm")),
-        "expected bad.wasm to be reported, got: {problems:?}"
+        problems
+            .iter()
+            .any(|(k, s)| *k == UdfProblem::LoadFailed && s.contains("bad.wasm")),
+        "expected bad.wasm load failure, got: {problems:?}"
     );
     assert!(registries.has("good"));
     assert!(!registries.has("bad"));
@@ -138,9 +148,9 @@ fn non_wasm_files_are_ignored() {
 
     let registries = build_registries_with_builtins();
     let host = WasmHost::new().unwrap();
-    let mut problems: Vec<String> = Vec::new();
-    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |p, m| {
-        problems.push(format!("{}: {m}", p.display()));
+    let mut problems: Vec<(UdfProblem, String)> = Vec::new();
+    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |p, kind, m| {
+        problems.push((kind, format!("{}: {m}", p.display())));
     })
     .unwrap();
     registries.swap_wasm(table);
@@ -175,7 +185,7 @@ fn empty_dir_produces_empty_table() {
     let tmp = tempfile::tempdir().unwrap();
     let registries = build_registries_with_builtins();
     let host = WasmHost::new().unwrap();
-    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |_, _| {}).unwrap();
+    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |_, _, _| {}).unwrap();
     assert!(table.is_empty());
     registries.swap_wasm(table);
     // Only built-ins remain.
@@ -185,3 +195,52 @@ fn empty_dir_produces_empty_table() {
         && n != "last-write-wins"));
 }
 
+
+#[test]
+fn failing_merge_degrades_to_miss_and_is_counted() {
+    // A module that loads fine but traps on every mcgw_merge call.
+    // Dispatch must degrade to Miss (stage 3b behaviour, unchanged)
+    // while the failure lands in the process-global metrics with
+    // kind="trap" — the observability stage 6 adds.
+    let wat = r#"(module
+      (memory (export "memory") 1)
+      (global $bump (mut i32) (i32.const 1024))
+      (func (export "mcgw_abi_version") (result i32) i32.const 1)
+      (func (export "mcgw_alloc") (param $size i32) (param $align i32) (result i32)
+        (local $p i32)
+        global.get $bump
+        local.set $p
+        global.get $bump
+        local.get $size
+        i32.add
+        global.set $bump
+        local.get $p)
+      (func (export "mcgw_dealloc") (param i32 i32 i32))
+      (func (export "mcgw_merge") (param i32 i32) (result i64)
+        unreachable))"#;
+
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("angry.wasm"), wat::parse_str(wat).unwrap()).unwrap();
+
+    let registries = build_registries_with_builtins();
+    let host = WasmHost::new().unwrap();
+    let table = udf_loader::scan_dir(&host, &registries, tmp.path(), |_, _, _| {}).unwrap();
+    registries.swap_wasm(table);
+
+    let entries = [mcgateway_core::Entry {
+        key: b"k",
+        pool: "p1",
+        status: mcgateway_core::Status::Hit,
+        t: None,
+        value: Some(b"v"),
+        line: None,
+    }];
+    let result = registries.apply("angry", &entries).expect("module registered");
+    assert!(matches!(result, mcgateway_core::MergeResult::Miss));
+
+    let exposition = metrics::global().encode();
+    assert!(
+        exposition.contains(r#"mcgateway_merge_errors_total{merge="angry",kind="trap"} 1"#),
+        "expected trap counter in exposition:\n{exposition}"
+    );
+}
