@@ -48,17 +48,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return reconcile.Result{}, fmt.Errorf("list keyspaces: %w", err)
 	}
 
+	snapshotObjects.WithLabelValues("pool").Set(float64(len(pools.Items)))
+	snapshotObjects.WithLabelValues("keyspace").Set(float64(len(keyspaces.Items)))
+
 	files, warns := Render(Snapshot{Pools: pools.Items, Keyspaces: keyspaces.Items})
+	// Warnings are the operator's status surface until the status
+	// subresource lands in Stage 5 of the plan: the log line carries
+	// the detail, the gauge is the alertable level.
+	renderWarnings.Set(float64(len(warns)))
 	for _, w := range warns {
-		// Warnings are the operator's whole status surface until the
-		// status subresource lands in Stage 5 of the plan.
 		logger.Info("render warning", "kind", w.Kind, "name", w.Name, "reason", w.Message)
 	}
 
 	res, err := Commit(r.FS, files)
 	if err != nil {
+		commitsTotal.WithLabelValues("error").Inc()
 		return reconcile.Result{}, err
 	}
+	commitsTotal.WithLabelValues("ok").Inc()
 	if res.WroteConfig || len(res.WroteModules)+len(res.RemovedModules)+len(res.CleanedTemp) > 0 {
 		logger.Info("committed",
 			"config", res.WroteConfig,

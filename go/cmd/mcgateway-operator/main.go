@@ -29,9 +29,10 @@ const saNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace
 
 func main() {
 	var (
-		dir        string
-		namespace  string
-		healthAddr string
+		dir         string
+		namespace   string
+		healthAddr  string
+		metricsAddr string
 	)
 	flag.StringVar(&dir, "dir", "/var/run/mcgateway",
 		"mount root the rendered config and modules are committed to")
@@ -39,6 +40,8 @@ func main() {
 		"namespace whose Pool/Keyspace CRs drive the config (default: POD_NAMESPACE, then the serviceaccount namespace file)")
 	flag.StringVar(&healthAddr, "health-addr", ":8081",
 		"listen address for the health and readiness probes")
+	flag.StringVar(&metricsAddr, "metrics-addr", ":8080",
+		"listen address for Prometheus metrics; \"0\" disables the endpoint")
 	zapOpts := zap.Options{}
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -46,13 +49,13 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 	logger := ctrl.Log.WithName("setup")
 
-	if err := run(dir, namespace, healthAddr); err != nil {
+	if err := run(dir, namespace, healthAddr, metricsAddr); err != nil {
 		logger.Error(err, "operator exiting")
 		os.Exit(1)
 	}
 }
 
-func run(dir, namespace, healthAddr string) error {
+func run(dir, namespace, healthAddr, metricsAddr string) error {
 	logger := ctrl.Log.WithName("setup")
 
 	ns, err := resolveNamespace(namespace)
@@ -87,8 +90,10 @@ func run(dir, namespace, healthAddr string) error {
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{ns: {}},
 		},
-		// Metrics land with Stage 6; no listener until then.
-		Metrics:                metricsserver.Options{BindAddress: "0"},
+		// Serves controller-runtime's built-ins plus the custom
+		// operator metrics (render warnings, commit results — see
+		// internal/operator/metrics.go).
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: healthAddr,
 		// N sidecars render the same files from the same CRs; there
 		// is no shared mutable state to elect a leader over.
