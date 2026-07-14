@@ -287,13 +287,18 @@ fn as_views(owned: &[OwnedEntry]) -> Vec<Entry<'_>> {
 /// times on the entries, the merge body was just timed, and `opts`
 /// carries the keyspace attribution. One FFI crossing, all the read
 /// metrics.
+///
+/// Infallible on purpose: the merge already succeeded, and metrics
+/// must never re-couple serving to their own health (the same
+/// contract the Lua side keeps by pcall'ing its hooks). Malformed
+/// opts fields are simply not observed.
 fn observe_read_dispatch(
     merge_name: &str,
     merge_seconds: f64,
     owned: &[OwnedEntry],
     result: &MergeResult,
     opts: Option<&LuaTable>,
-) -> LuaResult<()> {
+) {
     let m = metrics::global();
     m.observe_merge_duration(merge_name, merge_seconds);
     for e in owned {
@@ -303,32 +308,44 @@ fn observe_read_dispatch(
             e.elapsed.map(micros_to_seconds),
         );
     }
-    let Some(opts) = opts else { return Ok(()) };
-    let prefix: Option<LuaString> = opts.get("prefix")?;
-    let start: Option<i64> = opts.get("start")?;
+    let Some(opts) = opts else { return };
+    let prefix: Option<LuaString> = opts.get("prefix").ok().flatten();
+    let start: Option<i64> = opts.get("start").ok().flatten();
     if let Some(prefix) = prefix {
-        // Mirrors routes.lua's reply selection: a merge decision is a
-        // hit; no decision is a miss when any backend missed, an
-        // error only when every backend failed.
-        let outcome = match result {
-            MergeResult::Winner(_) | MergeResult::Synthesized(_) => "hit",
-            MergeResult::Miss => {
-                if owned.iter().any(|e| e.status == Status::Miss) {
-                    "miss"
-                } else {
-                    "error"
-                }
-            }
-        };
         let duration = start.map(|s| nanos_to_seconds(now_nanos().saturating_sub(s).max(0)));
         m.observe_request(
             &String::from_utf8_lossy(&prefix.as_bytes()),
             "read",
-            outcome,
+            read_outcome(result, owned),
             duration,
         );
     }
-    Ok(())
+}
+
+/// Mirror routes.lua's reply selection. A winner is labeled by the
+/// *chosen entry's* status — Lua returns that entry's response
+/// verbatim, so a merge that picks a miss entry yields a
+/// client-visible miss, not a hit. An out-of-range winner falls
+/// through to the same no-winner path Lua takes. (One accepted
+/// sliver: a winner pointing at an error entry whose `res` was nil is
+/// counted `error`, while Lua's fallback may synthesize a miss reply
+/// when another backend missed.)
+fn read_outcome(result: &MergeResult, owned: &[OwnedEntry]) -> &'static str {
+    let no_winner = |owned: &[OwnedEntry]| {
+        if owned.iter().any(|e| e.status == Status::Miss) {
+            "miss"
+        } else {
+            "error"
+        }
+    };
+    match result {
+        MergeResult::Synthesized(_) => "hit",
+        MergeResult::Winner(i) => match owned.get(*i).map(|e| e.status) {
+            Some(status) => status_label(status),
+            None => no_winner(owned),
+        },
+        MergeResult::Miss => no_winner(owned),
+    }
 }
 
 fn name_str(name: &LuaString) -> LuaResult<String> {
@@ -362,7 +379,7 @@ fn mcgateway_native(lua: &Lua) -> LuaResult<LuaTable> {
                     &owned,
                     &result,
                     opts.as_ref(),
-                )?;
+                );
 
                 match result {
                     MergeResult::Winner(i) => Ok(LuaValue::Integer(
